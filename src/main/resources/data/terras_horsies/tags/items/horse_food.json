@@ -1,0 +1,7 @@
+{
+  "replace": false,
+  "values": [
+    "#tfc:foods/grains",
+    "#tfc:foods/fruits"
+  ]
+}

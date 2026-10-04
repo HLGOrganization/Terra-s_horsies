@@ -1,0 +1,28 @@
+{
+  "required": true,
+  "minVersion": "0.8.5",
+  "package": "com.tfcicys.horses.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "refmap": "terras_horsies.refmap.json",
+  "mixins": [
+    "AbstractHorseFoodMixin",
+    "AbstractHorseCactusMixin",
+    "AbstractHorseThreatMixin",
+    "BhBreedHorseFamiliarityMixin",
+    "BhHorseCombatAlertDefendMixin",
+    "HorseCombatRetaliateMixin",
+    "DefendOwnerGoalAggroMixin",
+    "AbstractHorseDeathFrightMixin",
+    "AbstractDrawnEntityPullMixin",
+    "SupplyCartOverburdenMixin",
+    "AnimalCartOverburdenMixin"
+  ],
+  "client": [
+    "BhHorseHudMixin",
+    "BhInventoryEffectsMixin",
+    "BhTackTexturesLookupMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

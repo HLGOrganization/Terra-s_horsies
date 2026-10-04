@@ -1,0 +1,74 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="${mod_license}"
+
+[[mods]]
+modId="${mod_id}"
+version="${mod_version}"
+displayName="${mod_name}"
+description='''${mod_description}
+
+大地上的马驹们'''
+authors="${mod_authors}"
+
+[[dependencies.${mod_id}]]
+    modId="forge"
+    mandatory=true
+    versionRange="${forge_version_range}"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="minecraft"
+    mandatory=true
+    versionRange="${minecraft_version_range}"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="tfc"
+    mandatory=true
+    versionRange="[1.20.1-3.2.0,)"
+    ordering="AFTER"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="icys_better_horses"
+    mandatory=true
+    versionRange="[2.0.0,)"
+    ordering="AFTER"
+    side="BOTH"
+
+# Optional: when Jade is installed, Icy's horses get the same hover readout as TFC's livestock
+# (sex, familiarity, can-mate, pregnancy, wear, can-ride). Without Jade the addon works unchanged.
+[[dependencies.${mod_id}]]
+    modId="jade"
+    mandatory=false
+    versionRange="[11.0.0,)"
+    ordering="AFTER"
+    side="CLIENT"
+
+# Optional: More Attributes supplies the weight system we extend to animals.
+# Without it, mounts and carts carry no weight at all -- everything else still works.
+[[dependencies.${mod_id}]]
+    modId="more_attributes"
+    mandatory=false
+    versionRange="[1.0.0,)"
+    ordering="AFTER"
+    side="BOTH"
+
+# Optional: the carts whose overburden effects we remove, and whose cargo weight we inherit.
+# tfcastikorcarts depends on astikorcarts, so both are listed.
+[[dependencies.${mod_id}]]
+    modId="astikorcarts"
+    mandatory=false
+    versionRange="[1.1.0,)"
+    ordering="AFTER"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="tfcastikorcarts"
+    mandatory=false
+    versionRange="[1.1.0,)"
+    ordering="AFTER"
+    side="BOTH"

@@ -1,0 +1,39 @@
+# ── 构建产物 ──────────────────────────────────────────────────────────────
+build/
+.gradle/
+run/
+*.log
+
+# Gradle 的本地缓存目录（工作区层面的，不在工程内，但以防万一）
+.gradle-home/
+
+# ── 第三方 mod 的 jar ─────────────────────────────────────────────────────
+# libs/ 里放的是 TFC / Icy's Better Horses / Jade / More Attributes /
+# AstikorCarts 的 jar，它们只是**构建期依赖**，各有各的授权：
+#   icys-better-horses  jar 内为 CC0-1.0，但作者对外宣称 ARR
+#   Jade                CC BY-NC-SA 4.0（非商业 + 相同方式共享）
+#   TFC                 EUPL-1.2（强 copyleft）
+#   more_attributes / astikorcarts / tfcastikorcarts   MIT
+# 本项目的 jar 从不打包它们，源码仓库也不应携带它们 —— 否则就是在再分发别人的作品。
+# 想从源码构建的人，请自行按 README 的版本号把 jar 放进 libs/。
+libs/*.jar
+
+# ── IDE / 系统 ────────────────────────────────────────────────────────────
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.classpath
+.project
+Thumbs.db
+desktop.ini
+
+# ── 临时文件 ──────────────────────────────────────────────────────────────
+build-log.txt
+client-log.txt
+server-log.txt
+*-log.txt
+_tmp*/
+*.bak

@@ -1,0 +1,160 @@
+buildscript {
+    repositories {
+        maven { url = 'https://maven.minecraftforge.net' }
+        maven { url = 'https://repo.spongepowered.org/repository/maven-public/' }
+        mavenCentral()
+    }
+    dependencies {
+        classpath group: 'net.minecraftforge.gradle', name: 'ForgeGradle', version: '6.+', changing: true
+        classpath group: 'org.spongepowered', name: 'mixingradle', version: '0.7-SNAPSHOT'
+    }
+}
+
+plugins {
+    id 'java-library'
+    id 'idea'
+}
+
+apply plugin: 'net.minecraftforge.gradle'
+apply plugin: 'org.spongepowered.mixin'
+
+version = mod_version
+group = mod_group_id
+
+base {
+    archivesName = mod_archive_name
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+repositories {
+    maven { url = 'https://maven.minecraftforge.net' }
+    maven {
+        name = 'Modrinth'
+        url = 'https://api.modrinth.com/maven'
+        content {
+            includeGroup 'maven.modrinth'
+        }
+    }
+    mavenCentral()
+}
+
+minecraft {
+    // Official (Mojang) mappings: matches how TerraFirmaCraft itself is compiled,
+    // and avoids the Parchment librarian read-only-zip failure.
+    mappings channel: 'official', version: minecraft_version
+
+    runs {
+        client {
+            workingDirectory project.file('run')
+            property 'forge.logging.markers', 'REGISTRIES'
+            property 'forge.logging.console.level', 'debug'
+            mods {
+                "${mod_id}" {
+                    source sourceSets.main
+                }
+            }
+        }
+
+        server {
+            workingDirectory project.file('run')
+            property 'forge.logging.markers', 'REGISTRIES'
+            property 'forge.logging.console.level', 'debug'
+            arg '--nogui'
+            // For mixin testing in dev, prefer the built jar in run/mods over this exploded-dir source;
+            // see the note in the `mixin { }` block below.
+            mods {
+                "${mod_id}" {
+                    source sourceSets.main
+                }
+            }
+        }
+    }
+}
+
+mixin {
+    add sourceSets.main, "${mod_id}.refmap.json"
+    // NOTE: this passes --mixin.config to the dev runs. Mixin resolves that name through its own
+    // (MC-BOOTSTRAP layer) classloader, which cannot see the exploded build/resources/main directory,
+    // so the dev runs cannot initialise mixins and die with
+    // "The specified resource 'xxx.mixins.json' was invalid or could not be read".
+    // The shipped jar is unaffected: it carries MixinConfigs in its manifest, which Mixin reads via
+    // MixinPlatformAgentMinecraftForge in the correct layer. To exercise the mixins in dev, drop the
+    // built jar into run/mods (see README, "开发环境测试").
+    config "${mod_id}.mixins.json"
+}
+
+dependencies {
+    minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
+
+    // TerraFirmaCraft: compile-time only reference. Not bundled into the jar.
+    compileOnly fg.deobf("maven.modrinth:terrafirmacraft:${tfc_version}")
+    // Runtime counterpart, used ONLY by the dev `runServer` task so the mixins can be
+    // verified against the real mods. Never packaged into the jar.
+    runtimeOnly fg.deobf("maven.modrinth:terrafirmacraft:${tfc_version}")
+
+    // Icy's Better Horses: compile-time only reference to its public API surface
+    // (IHorseData / BhContent / GenderType), used by GenderSyncHandler.
+    // The jar is never bundled, copied or redistributed -- compiling against a
+    // dependency is not redistribution, which keeps this addon compliant with the
+    // upstream license regardless of how that license is interpreted.
+    compileOnly fg.deobf(files('libs/icys-better-horses-2.0.6-1.20.1-forge.jar'))
+    runtimeOnly fg.deobf(files('libs/icys-better-horses-2.0.6-1.20.1-forge.jar'))
+
+    // Jade: compile-time only, so the addon can register TFC's entity tooltip against Icy's horses.
+    // Jade is optional at runtime -- the plugin class is only ever touched when Jade is installed.
+    compileOnly fg.deobf(files('libs/Jade-1.20.1-Forge-11.13.2.jar'))
+
+    // More Attributes: compile-time only reference to its public weight API
+    // (DetailAttributes.EquipLoadMax/EquipLoadCurrent, ItemUtils.getWeight).
+    // Optional at runtime -- every entry point is guarded by a mod-loaded check.
+    compileOnly fg.deobf(files('libs/more_attributes-1.0.2.jar'))
+
+    // AstikorCarts / TFCAstikorCarts: needed to weaken the cart overburden threshold
+    // and to read the cargo weight, plus AbstractDrawnEntity.getPulling() for the
+    // tractor side of the weight inheritance. Optional at runtime.
+    compileOnly fg.deobf(files('libs/astikorcarts-1.20.1-1.1.8.jar'))
+    compileOnly fg.deobf(files('libs/TFCAstikorCarts-1.20.1-1.1.8.3.jar'))
+
+    compileOnly "org.jetbrains:annotations:26.0.2"
+    annotationProcessor "org.spongepowered:mixin:0.8.5:processor"
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 17
+}
+
+tasks.named('processResources', ProcessResources).configure {
+    // mods.toml / pack.mcmeta carry UTF-8 text (the Chinese mod name). Without this,
+    // Gradle's copy filtering reads and writes with the platform charset (GBK on this
+    // machine) and mangles it on the way into the jar.
+    filteringCharset = 'UTF-8'
+    def replaceProperties = [
+            minecraft_version      : minecraft_version,
+            minecraft_version_range: minecraft_version_range,
+            forge_version          : forge_version,
+            forge_version_range    : forge_version_range,
+            mod_id                 : mod_id,
+            mod_name               : mod_name,
+            mod_license            : mod_license,
+            mod_version            : mod_version,
+            mod_authors            : mod_authors,
+            mod_description        : mod_description,
+    ]
+    inputs.properties replaceProperties
+    filesMatching(['META-INF/mods.toml', 'pack.mcmeta']) {
+        expand replaceProperties
+    }
+}
+
+jar {
+    manifest {
+        attributes(
+                'MixinConfigs': "${mod_id}.mixins.json"
+        )
+    }
+}
