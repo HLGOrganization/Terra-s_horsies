@@ -913,18 +913,42 @@ public abstract class BhBreedHorseFamiliarityMixin extends Horse implements Hors
      */
     @Unique private boolean tfcicys$fleeFromCactus;
 
+    /**
+     * 本次逃离是否由环境伤害触发（岩浆、岩浆块、火焰……）。
+     *
+     * <p>与 {@code tfcicys$fleeFromCactus} 互斥，两者分别对应「脱离即停」和「计时器到点即停」
+     * 两种收尾；{@link FleeFromThreatGoal} 还要靠它决定是否绕开「只给野马」的限制。
+     */
+    @Unique private boolean tfcicys$fleeFromHazard;
+
     /** {@inheritDoc} */
     @Override
     public void tfcicys$startFleeing(final Vec3 point, final int ticks) {
         // 长距离冲刺一档：半径与速度交给 FleeFromThreatGoal 的默认值（16 格 / 2.0）。
-        this.tfcicys$startFleeing(point, ticks, 0.0D, 0.0D, false);
+        this.tfcicys$startFleeing(point, ticks, 0.0D, 0.0D, false, false);
     }
 
     /** {@inheritDoc} */
     @Override
     public void tfcicys$startFleeingLocal(final Vec3 point, final int ticks,
                                           final double radius, final double speed) {
-        this.tfcicys$startFleeing(point, ticks, radius, speed, true);
+        this.tfcicys$startFleeing(point, ticks, radius, speed, true, false);
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public void tfcicys$startFleeingHazard(final Vec3 point, final int ticks,
+                                           final double radius, final double speed) {
+        // 环境伤害这一档刻意不设 fromCactus：它的收尾条件就是计时器本身。
+        // 每次挨烫都会把 tfcicys$fleeUntil 往后推（见下面的合并逻辑），
+        // 不再受伤就自然到点结束 —— 也就是「逃到离开伤害区域为止」。
+        this.tfcicys$startFleeing(point, ticks, radius, speed, false, true);
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public boolean tfcicys$isHazardFlee() {
+        return this.tfcicys$fleeFromHazard;
     }
 
     /**
@@ -938,7 +962,7 @@ public abstract class BhBreedHorseFamiliarityMixin extends Horse implements Hors
      */
     private void tfcicys$startFleeing(final Vec3 point, final int ticks,
                                       final double radius, final double speed,
-                                      final boolean fromCactus) {
+                                      final boolean fromCactus, final boolean fromHazard) {
         if (point == null || ticks <= 0) {
             return;
         }
@@ -950,6 +974,7 @@ public abstract class BhBreedHorseFamiliarityMixin extends Horse implements Hors
             this.tfcicys$fleeRadius = radius;
             this.tfcicys$fleeSpeed = speed;
             this.tfcicys$fleeFromCactus = fromCactus;
+            this.tfcicys$fleeFromHazard = fromHazard;
         }
         this.tfcicys$fleeUntil = Math.max(this.tfcicys$fleeUntil, until);
     }
@@ -987,6 +1012,7 @@ public abstract class BhBreedHorseFamiliarityMixin extends Horse implements Hors
         this.tfcicys$fleePoint = null;
         this.tfcicys$fleeUntil = 0L;
         this.tfcicys$fleeFromCactus = false;
+        this.tfcicys$fleeFromHazard = false;
     }
 
     // ── 攻击者记忆：低血量逃跑用 ─────────────────────────────────────────────

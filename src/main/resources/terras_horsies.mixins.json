@@ -8,6 +8,7 @@
     "AbstractHorseFoodMixin",
     "AbstractHorseCactusMixin",
     "AbstractHorseThreatMixin",
+    "AbstractHorseTamingMixin",
     "BhBreedHorseFamiliarityMixin",
     "BhHorseCombatAlertDefendMixin",
     "HorseCombatRetaliateMixin",

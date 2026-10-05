@@ -1,5 +1,7 @@
 package com.tfcicys.horses;
 
+import java.util.List;
+
 import com.tfcicys.horses.load.MoreAttributesApi;
 
 import icy.betterhorses.net.IHorseData;
@@ -31,6 +33,30 @@ public final class TFCICYSConfig {
      * （见 {@link #creatureDefaultLoadOrFallback()}）。
      */
     public static final int DEFAULT_CREATURE_LOAD = 1000;
+
+    /**
+     * 环境伤害逃跑默认忽略的伤害类型。
+     *
+     * <p>判断标准只有一条：<b>跑开能不能改善处境</b>。溺水、摔落、饥饿、虚空、
+     * 魔法与凋零这些，马跑多远都照旧受伤，让它满地乱跑只会更难处理。
+     * 岩浆、岩浆块、火焰、甜浆果丛这些则相反 —— 挪开就是唯一的活路。
+     *
+     * <p>{@code minecraft:cactus} 也被排掉了：仙人掌有自己的「贴着就停」收尾判定
+     * （见 {@code fleeFromCactus}），走环境逃跑这条路会把那套逻辑顶掉。
+     */
+    public static final List<String> DEFAULT_HAZARD_IGNORE = List.of(
+            "minecraft:cactus",
+            "minecraft:drowning",
+            "minecraft:fall",
+            "minecraft:fly_into_wall",
+            "minecraft:starve",
+            "minecraft:generic",
+            "minecraft:generic_kill",
+            "minecraft:bad_respawn_point",
+            "minecraft:magic",
+            "minecraft:indirect_magic",
+            "minecraft:wither",
+            "minecraft:out_of_world");
 
     public static final Common COMMON;
     public static final ForgeConfigSpec COMMON_SPEC;
@@ -71,6 +97,23 @@ public final class TFCICYSConfig {
             return COMMON.horseNeutralCombat.get();
         } catch (final IllegalStateException notLoadedYet) {
             return true;
+        }
+    }
+
+    /**
+     * 是否输出负重链路的诊断日志。
+     *
+     * <p>同时接受 JVM 参数 {@code -Dterras_horsies.debugLoad=true}：
+     * 专用服务器改启动脚本比改配置文件快，而且不会被 Forge 重写配置时覆盖掉。
+     */
+    public static boolean debugLoad() {
+        if (Boolean.parseBoolean(System.getProperty("terras_horsies.debugLoad", "false"))) {
+            return true;
+        }
+        try {
+            return COMMON.debugLoad.get();
+        } catch (final IllegalStateException notLoadedYet) {
+            return false;
         }
     }
 
@@ -352,6 +395,66 @@ public final class TFCICYSConfig {
         return secondsToTicks(seconds);
     }
 
+    /** 是否从非生物来源的环境伤害（岩浆、岩浆块、火焰……）中逃开。 */
+    public static boolean hazardFlee() {
+        try {
+            return COMMON.hazardFlee.get();
+        } catch (final IllegalStateException notLoadedYet) {
+            return true;
+        }
+    }
+
+    /** 环境伤害逃跑在最远多少格外找落点。 */
+    public static double hazardFleeDistance() {
+        try {
+            return COMMON.hazardFleeDistance.get();
+        } catch (final IllegalStateException notLoadedYet) {
+            return 6.0D;
+        }
+    }
+
+    /** 环境伤害逃跑的移动速度修正。1.0 = 正常走，2.0 = 冲刺。 */
+    public static double hazardFleeSpeed() {
+        try {
+            return COMMON.hazardFleeSpeed.get();
+        } catch (final IllegalStateException notLoadedYet) {
+            return 1.3D;
+        }
+    }
+
+    /**
+     * 不再受到环境伤害之后，还继续逃多少 tick。
+     *
+     * <p>岩浆与岩浆块的伤害是每 10 tick 结算一次，所以这个值必须明显大于 10，
+     * 否则马会在两次烫伤之间停下来。默认 3 秒。
+     */
+    public static int hazardFleeTicks() {
+        final double seconds;
+        try {
+            seconds = COMMON.hazardFleeSeconds.get();
+        } catch (final IllegalStateException notLoadedYet) {
+            return 20 * 3;
+        }
+        return secondsToTicks(seconds);
+    }
+
+    /**
+     * 不触发环境逃跑的伤害类型 ID 列表。
+     *
+     * <p>默认排掉「逃也没用」的那些：溺水、摔落、饥饿、虚空、魔法、凋零之类。
+     * 另外把 {@code minecraft:cactus} 也排掉了 —— 仙人掌有自己的「贴着就停」判定，
+     * 走这条路反而会把那套收尾逻辑顶掉。
+     */
+    public static List<String> hazardFleeIgnore() {
+        try {
+            return List.copyOf(COMMON.hazardFleeIgnore.get());
+        } catch (final IllegalStateException notLoadedYet) {
+            return DEFAULT_HAZARD_IGNORE;
+        } catch (final Throwable broken) {
+            return DEFAULT_HAZARD_IGNORE;
+        }
+    }
+
     /** 骑乘驯服的概率是否改由 TFC 亲密度决定。 */
     public static boolean tamingByFamiliarity() {
         try {
@@ -540,6 +643,13 @@ public final class TFCICYSConfig {
         public final ForgeConfigSpec.DoubleValue cactusFleeSpeed;
         public final ForgeConfigSpec.DoubleValue cactusFleeSeconds;
 
+        // ── 环境伤害逃跑（同一节下）─────────────────────────────────
+        public final ForgeConfigSpec.BooleanValue hazardFlee;
+        public final ForgeConfigSpec.DoubleValue hazardFleeDistance;
+        public final ForgeConfigSpec.DoubleValue hazardFleeSpeed;
+        public final ForgeConfigSpec.DoubleValue hazardFleeSeconds;
+        public final ForgeConfigSpec.ConfigValue<List<? extends String>> hazardFleeIgnore;
+
         // ── 攻击者记忆（低血量逃跑的触发依据）───────────────────────
         public final ForgeConfigSpec.DoubleValue threatMemorySeconds;
 
@@ -565,6 +675,9 @@ public final class TFCICYSConfig {
         // ── 马铠 ────────────────────────────────────────────────────
         public final ForgeConfigSpec.BooleanValue cactusProofArmor;
 
+        // ── 诊断 ────────────────────────────────────────────────────
+        public final ForgeConfigSpec.BooleanValue debugLoad;
+
         Common(ForgeConfigSpec.Builder b) {
             b.comment("Terra's horsies [TFC x icy's horses] -- carry weight and cart integration").push("load");
 
@@ -572,7 +685,7 @@ public final class TFCICYSConfig {
                     .comment("Base carry capacity for every living entity. Horses override it with the values below.")
                     .defineInRange("creatureDefaultLoad", DEFAULT_CREATURE_LOAD, 0, Integer.MAX_VALUE);
 
-            b.comment("Carry capacity per Icy archetype. Breed mapping: see the README.").push("horses");
+            b.comment("Carry capacity per Icy archetype. Breed mapping: see docs/DEV_NOTES.md.").push("horses");
             raceLoad    = b.comment("RACE -- Arabian / Quarter / Thoroughbred").defineInRange("raceLoad", 900, 0, Integer.MAX_VALUE);
             ponyLoad    = b.comment("PONY -- Haflinger / Icelandic").defineInRange("ponyLoad", 1600, 0, Integer.MAX_VALUE);
             westernLoad = b.comment("WESTERN -- American Paint / Appaloosa / Morgan").defineInRange("westernLoad", 1800, 0, Integer.MAX_VALUE);
@@ -722,6 +835,38 @@ public final class TFCICYSConfig {
                     .comment("Safety bound in seconds for the cactus step. Default 10; rarely reached.")
                     .defineInRange("cactusFleeSeconds", 10.0D, 0.0D, 3600.0D);
 
+            hazardFlee = b
+                    .comment("Horses try to walk out of damage that comes from something other than a living attacker:",
+                             "lava, magma blocks, fire, sweet berry bushes and the like. Default true.",
+                             "Unlike the cactus step this is not wild-only -- burning to death is never acceptable --",
+                             "but a ridden horse still yields to its rider. See hazardFleeIgnore for the exclusions.")
+                    .define("hazardFlee", true);
+
+            hazardFleeDistance = b
+                    .comment("How far away from the hurting spot the horse aims for, in blocks. Default 6.",
+                             "The flee keeps renewing as long as the damage keeps coming, so a horse inside a large",
+                             "lava pool walks out step by step rather than stopping at one fixed distance.")
+                    .defineInRange("hazardFleeDistance", 6.0D, 1.0D, 32.0D);
+
+            hazardFleeSpeed = b
+                    .comment("Movement speed modifier while escaping that damage. Default 1.3 (a brisk trot).")
+                    .defineInRange("hazardFleeSpeed", 1.3D, 0.5D, 3.0D);
+
+            hazardFleeSeconds = b
+                    .comment("How many seconds the horse keeps escaping after the last such hit. Default 3.",
+                             "Lava and magma damage land every 10 ticks, so keep this above 0.5 or the horse",
+                             "would stop between two ticks of damage. This timer is what makes the flee end",
+                             "once the horse has actually left the damaging area.")
+                    .defineInRange("hazardFleeSeconds", 3.0D, 0.0D, 3600.0D);
+
+            hazardFleeIgnore = b
+                    .comment("Damage type ids the horse will NOT run from, because running cannot help.",
+                             "Defaults cover drowning, falling, starvation, the void, magic and wither -- plus",
+                             "minecraft:cactus, which has its own 'stop as soon as the cactus is cleared' logic.",
+                             "Anything not listed here counts as a hazard. Use the full id, e.g. minecraft:lava.")
+                    .defineListAllowEmpty("hazardFleeIgnore", DEFAULT_HAZARD_IGNORE,
+                            o -> o instanceof String);
+
             threatMemorySeconds = b
                     .comment("How long a horse remembers who hit it, in seconds. Default 10, 0 = no memory.",
                              "Low-health fleeing reads it, and every new hit refreshes it.")
@@ -755,7 +900,10 @@ public final class TFCICYSConfig {
             tamingByFamiliarity = b
                     .comment("Replace vanilla's riding-to-tame dice roll with this mod's familiarity curve. Default true.",
                              "Done by overriding getTemper(); vanilla's attempt gate, bucking, particles and sounds are unchanged.",
-                             "Only affects riding-to-tame and only Icy breeds. false = back to the vanilla temper system.")
+                             "Covers Icy's breeds and TFC's own horse / donkey / mule. TFC equines additionally get their",
+                             "familiarity pushed just past HorseProperties.TAMED_FAMILIARITY on a successful roll, because",
+                             "TFC's isTamed() ignores vanilla's tame flag and reads familiarity only.",
+                             "false = back to the vanilla temper system.")
                     .define("tamingByFamiliarity", true);
 
             b.comment("-- The four anchors of the chance curve --",
@@ -822,6 +970,19 @@ public final class TFCICYSConfig {
                     .comment("Wearing any horse armor makes the horse immune to cactus damage (including cactus-like blocks). Default true.",
                              "Icy's 15 breeds only.")
                     .define("cactusProofArmor", true);
+
+            b.pop();
+
+            b.comment("Diagnostics. Normal play never needs these; they exist to debug bug reports.").push("debug");
+
+            debugLoad = b
+                    .comment("Log the carry-weight pipeline once a second for every horse: which side it runs on,",
+                             "the cart that entity is registered as pulling, whether the More Attributes",
+                             "attributes exist on that entity, and the computed current / max load.",
+                             "Also honoured as a JVM flag, which is handier on a dedicated server:",
+                             "  -Dterras_horsies.debugLoad=true",
+                             "Verbose by design. Default false.")
+                    .define("debugLoad", false);
 
             b.pop();
         }

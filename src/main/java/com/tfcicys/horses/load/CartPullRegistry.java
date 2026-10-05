@@ -36,15 +36,19 @@ public final class CartPullRegistry {
         }
         if (puller == null) {
             // 只清掉原本指向这辆车的记录。
+            final Entity previous = pullerOf(cart);
             PULLING.values().removeIf(v -> v == cart);
+            LoadDebug.pullChange(previous, cart, true);
             return;
         }
         PULLING.put(puller, cart);
+        LoadDebug.pullChange(puller, cart, false);
     }
 
     /** 解除某辆车的挂接（换拉车者、拆车、分块卸载时调用）。 */
     public static void detach(Entity cart) {
         if (cart != null) {
+            LoadDebug.pullChange(pullerOf(cart), cart, true);
             PULLING.values().removeIf(v -> v == cart);
         }
     }

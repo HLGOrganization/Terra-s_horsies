@@ -68,6 +68,8 @@
 | 21 | Icy 马匹**穿着任意马铠时免疫仙人掌刺伤**；**野马被仙人掌扎到会挪开一点**（短距离、脱离那丛即停，含其他模组的仙人掌） | `mixin/AbstractHorseCactusMixin.java`、`util/CactusBlocks.java`（见第 18 节） |
 | 22 | **骑乘驯服的概率改由 TFC 亲密度决定**（0→1%／6→5%／18→20%／35→90%／>35→100%），并与 **More Attributes** 的「力量+技巧」联动加成 | `mixin/BhBreedHorseFamiliarityMixin.java`（见第 19 节） |
 | 23 | **年龄统一由 TFC 的生日决定**；野外生成补生日戳（避免刷出来的马全是幼年）；马匹面板的预览实体不再一律显示为幼驹 | `mixin/BhBreedHorseFamiliarityMixin.java`（见第 20 节） |
+| 24 | **TFC 自己的马、驴、骡也能按亲密度概率驯服**。原版只有 Icy 生效：TFC 的 temper 恒为 0（成功率 0%），而且就算掷骰成功，它只设原版 tame 标记 —— TFC 的 `isTamed()` 只看亲密度，于是马永远"未驯服"、玩家被无限甩下来 | `mixin/AbstractHorseTamingMixin.java`、`taming/TfcEquineTaming.java`（见第 19 节） |
+| 25 | **被非生物来源伤害时主动逃离**：岩浆、岩浆块、火焰、甜浆果丛、掉落的铁砧／TNT……每次挨伤都续一次时限，一直逃到**不再受伤**为止（= 已离开伤害区域）。家养马同样生效，被骑着时让位给玩家 | `mixin/AbstractHorseThreatMixin.java`、`util/EnvironmentalDamage.java`、`ai/FleeFromThreatGoal.java`（见第 21 节） |
 
 ---
 
@@ -2253,6 +2255,70 @@ m_30624_()
 
 ---
 
+## 19.1 补上 TFC 自己的马、驴、骡
+
+第 19 节实现的是 **Icy 马**。玩家实测报告「概率驯服在 TFC 的马、驴、骡上没有生效」——
+这个观察是对的，而且原因不是漏写，是 TFC 把「已驯服」整个换掉了，导致原版驯服流程
+**两环各自断掉**。
+
+### 断在哪
+
+```java
+// TFCHorse / TFCChestedHorse（javap 核对过字节码）
+public boolean isTamed() { return getFamiliarity() > 0.15f; }   // ← 只看亲密度
+```
+
+| 环节 | 原版行为 | 在 TFC 马上的结果 |
+|------|----------|-------------------|
+| 掷骰成功率 | `random.nextInt(100) < getTemper()`，而 `getTemper()` 出厂为 **0** | 成功率 **0%**。temper 只有喂食和失败才会慢慢涨 |
+| 成功之后 | 调 `tameWithName()`，设原版 tame 标记 + 主人 + 粒子音效 + `TAME_ANIMAL` 统计 | TFC 的 `isTamed()` **完全不看那个标记** → 马依然"未驯服" → `RunAroundLikeCrazyGoal` 永远在跑，玩家被无限甩下来 |
+
+两个类都**没有**覆写 `getTemper()`（javap 核对：`TFCHorse`、`TFCChestedHorse` 的方法表里都没有），
+所以第 19 节那套给 Icy 用的实现根本轮不到它们。
+
+### 顺便确认：骑着驯服这条路在 TFC 里是通的
+
+`HorseProperties.tickAnimalData()` 的确会调 `rejectPassengers()`（掀人 + `makeMad()` + 愤怒粒子），
+但字节码显示触发条件是**乘客身上有 `OVERBURDENED` 效果**（偏移 139–155：读 `TFCEffects.OVERBURDENED`
+→ `hasEffect` → `ifeq` 跳过），**不是**"马未驯服"。也就是说 TFC 允许骑上未驯服的马，
+原版那套甩人流程会正常跑 —— 所以修复点选在"原版流程里"是对的，不需要另造一套挂载事件。
+
+### 怎么修
+
+只补那两环，其他一律不动 —— 甩人动作、粒子、音效、统计全部还是原版自己在做的。
+
+| 注入 | 位置 | 做什么 |
+|------|------|--------|
+| 第 1 环 | `AbstractHorse.getTemper` 的 `RETURN` | 把原版算好的值换成亲密度曲线（同第 19 节的 `tamePercent`） |
+| 第 2 环 | `AbstractHorse.tameWithName` 的 `TAIL` | 把亲密度推到 `HorseProperties.TAMED_FAMILIARITY + 0.01`，只加不减 |
+
+两者都在 `mixin/AbstractHorseTamingMixin.java`，判定收口在 `taming/TfcEquineTaming.java`。
+
+**为什么挂在原版 `AbstractHorse` 上也能管到 TFC 的马**：TFC 的两个类都没覆写这两个方法，
+注入原方法就等于注入它们继承到的那一份。
+
+**为什么用注入而不是 `@Override`**（这里是关键，值得记一笔）：
+
+更直观的写法是混入 `TFCHorse` / `TFCChestedHorse` 然后 `@Override getTemper()`，
+但它要求混入类声明目标的直接父类（否则调不到 `super.getTemper()`），而且覆写是否被改名
+取决于 Mixin 对混入类继承链的推断 —— **推断不出来时方法会带着 `getTemper` 这个名字留在类里，
+而目标类的同名方法叫 `m_30624_`，覆写静默失效**：编译通过、构建通过、进游戏毫无效果。
+
+这个隐患是实打实观察到的：第一版（覆写形式）构建出的 jar 里，
+`terras_horsies.refmap.json` 只有 `tameWithName → m_30637_`，**没有 `getTemper`**；
+改成注入形式后 refmap 里出现了 `"getTemper": "...AbstractHorse;m_30624_()I"`。
+注入点选择器一定会被写进 refmap，这才是可验证的。
+
+**作用范围**：`TfcEquineTaming.isTfcEquine` = `instanceof TFCHorse || instanceof TFCChestedHorse`，
+即马／驴／骡三种（`TFCDonkey`、`TFCMule` 都继承抽象的 `TFCChestedHorse`）。
+刻意**不用**更宽松的 `instanceof HorseProperties` —— Icy 的马由本模组的 mixin 实现了那个接口，
+宽判会把 Icy 一起卷进来，两套机制会在同一个 `getTemper()` 上叠算。
+
+**配置**：沿用第 19 节的 `tamingByFamiliarity`（默认 true），没有新增开关。
+关掉它就退回原版 temper 系统（对 TFC 马而言等于回到"永远驯不服"）。
+
+---
+
 ## 20. 年龄：谁说了算
 
 ### 20.1 三个被覆写的方法
@@ -2345,6 +2411,77 @@ public void setBaby(boolean baby) {
 1. 骑面板键打开马匹列表，每匹马的预览模型应当与它在世界里的实际年龄一致（成年马 = 成年模型）。
 2. 用 `/summon` 或刷怪蛋生成一只 Icy 马，观察它是随机年龄的成年个体（偶尔幼年，约 5%）。
 3. TFC 繁育出一只幼驹，确认它是幼年、并且会随时间正常长大（不会被反复重置成新生）。
+
+---
+
+## 21. 非生物来源的伤害：挪开，直到不再受伤
+
+玩家报告「马匹在岩浆块仍然会不动并且烫死」，要求在第 18 节（仙人掌）的基础上，
+把"挪开"推广到**任何非生物实体带来的伤害**。
+
+### 触发条件
+
+入口和记攻击者同一处：`mixin/AbstractHorseThreatMixin.java` 的 `AbstractHorse.hurt` HEAD。
+分两种：
+
+| `source.getEntity()` | 例子 | 处理 |
+|----------------------|------|------|
+| 是活体 | 玩家、僵尸、骷髅（弹射物返回的是**发射者**） | 记攻击者，走第 17 节的低血量逃跑 |
+| 为 `null` | 岩浆、岩浆块、火焰、甜浆果丛、营火 | **走本节** |
+| 是非生物实体 | 掉落的铁砧、TNT | **走本节** |
+
+顺带补了两个过滤：`amount <= 0` 直接返回（有些模组用 0 伤害试探），
+`source.getEntity() == 自己` 也返回（箭弹回来、自己的弹射物）。
+
+### 收尾条件 —— 这一节的核心
+
+仙人掌那一档靠「身边还有没有仙人掌」这个**事实**收尾（脱离即停）。
+环境伤害没有这个便利：岩浆不会告诉马它的边界在哪，也没法靠嗅方块判断。
+所以改成**计时器续期**：
+
+```
+第一次挨烫  → 记下挨烫位置，开始逃（默认 3 秒）
+还在岩浆里  → 每 10 tick 挨一次烫 → 每次把截止时间往后推
+出去了      → 不再挨烫 → 计时器耗尽 → 结束
+```
+
+**"每次挨烫续一次"正好就是"一直逃到离开伤害区域为止"**，不需要任何方块识别。
+`ai/FrightenedHorse` 为此加了一档 `tfcicys$startFleeingHazard`，它和仙人掌那一档
+互斥（`tfcicys$fleeFromCactus` / `tfcicys$fleeFromHazard`），因为两者的收尾方式不同。
+
+逃离点取**挨烫时马所在的位置**，而且每次挨烫都会更新它 —— 效果是"顺着一个方向往外走"，
+所以在**大片**岩浆里也会一步步走出去，而不是在一个固定距离上停住。
+
+### 两个刻意的宽容
+
+| 规则 | 普通逃跑（第 17、18 节） | 环境伤害 |
+|------|--------------------------|----------|
+| 只给野马 | 是（`isWildHorse`） | **否** —— 烧死谁都不行，家养马一样跑 |
+| 受 `neutralCombat` 总开关约束 | 是 | **否** —— 这跟"要不要中立"无关 |
+| `radius` 到了就停 | 是（防呆上限） | **否** —— 还在挨烫就继续走 |
+| 被骑着时 | 让位给玩家 | 同样让位（该由玩家把马带出来，而不是让它跟缰绳较劲） |
+
+### 哪些伤害不逃
+
+配置项 `hazardFleeIgnore`（伤害类型 ID 列表，可写 `minecraft:drowning` 也可只写 `drowning`）。
+判断标准只有一条：**挪开能不能改善处境**。
+
+默认排掉：`cactus`（有自己的收尾判定，混在一起会把标志位顶掉）、`drowning`、`fall`、
+`fly_into_wall`、`starve`、`generic`、`generic_kill`、`bad_respawn_point`、`magic`、
+`indirect_magic`、`wither`、`out_of_world`。
+取不到类型名时**保守地当作忽略**，免得一次 API 异常就让马无缘无故开始乱跑。
+
+新增配置（都在 `neutral_combat.flee` 节下，英文注释）：
+`hazardFlee`（默认 true）、`hazardFleeDistance`（6 格）、`hazardFleeSpeed`（1.3）、
+`hazardFleeSeconds`（3 秒，**必须大于 0.5** —— 岩浆与岩浆块的伤害间隔是 10 tick）、
+`hazardFleeIgnore`。
+
+### 已知范围限制
+
+这一档搭在 `FrightenedHorse` 上，而那个接口只有 Icy 的 15 个品种实现
+（原版马、TFC 的马／驴／骡、羊驼都没有这套逃跑系统）。
+所以：**Icy 的马**被岩浆烫到会跑，**TFC 自己的**马驴骡不会。
+把它们也纳入需要另一套搬运逻辑（TFC 的马科要走亲密度体系），暂未实现。
 
 ---
 

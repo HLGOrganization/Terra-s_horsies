@@ -16,6 +16,7 @@ import net.minecraft.world.entity.ai.attributes.Attribute;
 import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.minecraft.world.entity.animal.horse.AbstractHorse;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraftforge.common.capabilities.ForgeCapabilities;
@@ -258,11 +259,18 @@ public final class LoadManager {
         final Attribute maxAttr = MoreAttributesApi.equipLoadMax();
         final Attribute curAttr = MoreAttributesApi.equipLoadCurrent();
         if (maxAttr == null || curAttr == null) {
+            // 上游缺席：整条负重链路都不该工作，这是预期内的静默退化。
             return;
         }
         final AttributeInstance maxInstance = entity.getAttribute(maxAttr);
         final AttributeInstance curInstance = entity.getAttribute(curAttr);
         if (maxInstance == null || curInstance == null) {
+            // 上游在场、属性却不在这个实体上——只可能是我们的注册没生效。
+            // 这一条绝不能再静默：它正是「玩家正常、马匹负重怎么都不涨」最可能的成因，
+            // 而玩家不需要我们的注册（More Attributes 自己注册了玩家），所以只会马匹中招。
+            if (entity instanceof AbstractHorse) {
+                LoadDebug.missingAttribute(entity);
+            }
             return;
         }
 

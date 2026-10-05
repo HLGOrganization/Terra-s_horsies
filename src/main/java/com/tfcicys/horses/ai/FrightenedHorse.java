@@ -67,6 +67,41 @@ public interface FrightenedHorse {
     void tfcicys$startFleeingLocal(Vec3 point, int ticks, double radius, double speed);
 
     /**
+     * 记录一个「逃离点」，用于<b>非生物来源的环境伤害</b>：岩浆、岩浆块、火焰、
+     * 甜浆果丛这类方块或自然现象造成的伤害。
+     *
+     * <h2>收尾条件与仙人掌那一档不同</h2>
+     *
+     * <p>{@link #tfcicys$startFleeingLocal} 的收尾靠「附近还有没有仙人掌」这个事实判断。
+     * 环境伤害没法这样判 —— 马不可能自己去嗅哪里是岩浆。所以这里改用<b>计时器续期</b>：
+     * 每挨一次烫就把截止时间往后推一遍，不再挨烫了计时器自然到点，逃跑结束。
+     *
+     * <p>这个设计刚好实现了「一直逃到离开伤害区域为止」：
+     * 还在岩浆里 → 每 10 tick 挨一次烫 → 计时器不断续上 → 继续逃；
+     * 出去了 → 不再挨烫 → 计时器耗尽 → 停下。不需要任何方块识别。
+     *
+     * <p>不限于野马：被岩浆烧死对家养马同样不可接受。唯一不会触发的场合是被玩家骑着 ——
+     * {@link FleeFromThreatGoal} 会主动让位给骑手，那时该由玩家自己把马带出来。
+     *
+     * @param point  要远离的世界坐标，通常是挨烫时马所在的位置
+     * @param ticks  不再受伤后还继续逃多少 tick（每次受伤都会重置）
+     * @param radius 最多挪开多少格；{@code <= 0} 表示用默认半径
+     * @param speed  移动速度修正；{@code <= 0} 表示用默认速度
+     */
+    void tfcicys$startFleeingHazard(Vec3 point, int ticks, double radius, double speed);
+
+    /**
+     * 当前的逃离是不是由环境伤害（岩浆、岩浆块、火焰……）触发的。
+     *
+     * <p>这一档要绕开「只给野马」的限制：仙人掌、同伴死亡、低血量这些行为设计成野马专有，
+     * 但被岩浆烧死对家养马一样不可接受。所以 {@link FleeFromThreatGoal} 靠这个标志
+     * 把环境伤害单独放行，另外两条规则维持原样。
+     *
+     * <p>只有在 {@link #tfcicys$fleePoint()} 非空时才有意义。
+     */
+    boolean tfcicys$isHazardFlee();
+
+    /**
      * 当前有效的逃离点；没有、已过期、或者<b>已经没必要再逃</b>时返回 {@code null}。
      *
      * <p>过期判断用的是 {@code level().getGameTime()}，所以只在服务端有意义。

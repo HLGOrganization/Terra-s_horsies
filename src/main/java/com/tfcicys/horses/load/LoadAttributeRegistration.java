@@ -2,6 +2,9 @@ package com.tfcicys.horses.load;
 
 import java.util.List;
 
+import org.slf4j.Logger;
+
+import com.mojang.logging.LogUtils;
 import com.tfcicys.horses.TFCICYSConfig;
 import com.tfcicys.horses.TfcIcysHorses;
 
@@ -30,11 +33,14 @@ import net.minecraftforge.fml.common.Mod;
 @Mod.EventBusSubscriber(modid = TfcIcysHorses.MOD_ID, bus = Mod.EventBusSubscriber.Bus.MOD)
 public final class LoadAttributeRegistration {
 
+    private static final Logger LOGGER = LogUtils.getLogger();
+
     private LoadAttributeRegistration() {}
 
     @SubscribeEvent
     public static void onEntityAttributeModification(EntityAttributeModificationEvent event) {
         if (!TfcIcysHorses.hasMoreAttributes()) {
+            LOGGER.info("[terras_horsies] More Attributes 不在场，负重系统整体关闭。");
             return;
         }
 
@@ -42,6 +48,12 @@ public final class LoadAttributeRegistration {
         final Attribute current = MoreAttributesApi.equipLoadCurrent();
         if (max == null || current == null) {
             // 上游改了字段名或注册失败：整体退化为「无负重」，绝不半残。
+            // 这一条必须喊出来——它会让所有非玩家生物（尤其马匹）静默地拿不到负重，
+            // 而玩家因为由 More Attributes 自己注册，看起来一切正常，极难排查。
+            LOGGER.warn("[terras_horsies] 读不到 More Attributes 的负重属性"
+                    + "（equipLoadMax={}, equipLoadCurrent={}），已跳过注册："
+                    + "所有非玩家生物都不会有负重与超重减速。请连同上一条 More Attributes 相关日志一起反馈。",
+                    max, current);
             return;
         }
 
@@ -49,6 +61,7 @@ public final class LoadAttributeRegistration {
         // common setup 阶段，先后没有保证，配置没加载时 get() 会抛异常导致启动硬崩。
         final double defaultCap = TFCICYSConfig.creatureDefaultLoadOrFallback();
         final List<EntityType<? extends LivingEntity>> types = event.getTypes();
+        int registered = 0;
         for (final EntityType<? extends LivingEntity> type : types) {
             // 玩家已经由 More Attributes 自己注册过，重复添加会抛错。
             if (type == EntityType.PLAYER) {
@@ -56,10 +69,14 @@ public final class LoadAttributeRegistration {
             }
             if (!event.has(type, max)) {
                 event.add(type, max, defaultCap);
+                registered++;
             }
             if (!event.has(type, current)) {
                 event.add(type, current, 0.0D);
             }
         }
+
+        LOGGER.info("[terras_horsies] 负重属性已注册到 {} / {} 种生物（初始上限 {}，运行时按马匹类别覆盖）。",
+                registered, types.size(), defaultCap);
     }
 }

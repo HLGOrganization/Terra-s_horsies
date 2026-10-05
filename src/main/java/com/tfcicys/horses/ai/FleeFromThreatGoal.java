@@ -117,9 +117,6 @@ public class FleeFromThreatGoal extends Goal {
 
     @Override
     public boolean canUse() {
-        if (!TFCICYSConfig.neutralCombat()) {
-            return false;
-        }
         // 被骑着时不接管移动：这时候方向由玩家决定，自动逃跑只会和玩家抢操控。
         if (this.horse.isVehicle()) {
             return false;
@@ -127,7 +124,27 @@ public class FleeFromThreatGoal extends Goal {
         if (!(this.horse instanceof FrightenedHorse)) {
             return false;
         }
-        // 两条逃跑规则只给野马。已驯服的马（Icy 归属，或 TFC 亲密度 ≥ 0.15）不逃。
+        final FrightenedHorse frightened = (FrightenedHorse) this.horse;
+
+        // ⓪ 环境伤害（岩浆、岩浆块、火焰、甜浆果丛……）。
+        //    排在最前面，而且刻意不看 neutralCombat、也不看野马/家马：
+        //    「被岩浆烧死」和「要不要中立」无关，家养马同样得跑出来。
+        //    收尾完全交给计时器 —— 每次挨烫续一次，不再受伤就结束（见 canContinueToUse）。
+        final Vec3 hazard = frightened.tfcicys$fleePoint();
+        if (hazard != null && frightened.tfcicys$isHazardFlee()) {
+            this.threat = hazard;
+            this.fromCombatTarget = false;
+            final double hazardRadius = frightened.tfcicys$fleeRadius();
+            this.radius = hazardRadius > 0.0D ? Math.max(MIN_PUSH, hazardRadius) : SEARCH_XZ;
+            final double hazardSpeed = frightened.tfcicys$fleeSpeed();
+            this.speed = hazardSpeed > 0.0D ? hazardSpeed : FLEE_SPEED;
+            return true;
+        }
+
+        if (!TFCICYSConfig.neutralCombat()) {
+            return false;
+        }
+        // 下面两条逃跑规则只给野马。已驯服的马（Icy 归属，或 TFC 亲密度 ≥ 0.15）不逃。
         // 判定方式见 TFCICYSConfig#isWildHorse。
         if (!TFCICYSConfig.isWildHorse(this.horse)) {
             return false;
@@ -151,7 +168,6 @@ public class FleeFromThreatGoal extends Goal {
 
         // ② 外部写入的受惊点：附近有马匹死亡，或挨了仙人掌。
         //    两档的半径／速度由写入方给出，<= 0 表示用本类的默认值。
-        final FrightenedHorse frightened = (FrightenedHorse) this.horse;
         final Vec3 fright = frightened.tfcicys$fleePoint();
         if (fright != null) {
             this.threat = fright;
@@ -183,7 +199,11 @@ public class FleeFromThreatGoal extends Goal {
             // 防呆上限：真的拉开 radius 格也算脱离，顺手清掉状态，免得 Goal 反复重启。
             // 仙人掌那一档半径只有 4 格，通常根本走不到这里 —— 它的实际停止点
             // 是上面那句 fleePoint() == null，也就是「脱离即停」。
-            if (this.horse.position().distanceToSqr(fright) >= this.radius * this.radius) {
+            //
+            // 环境伤害那一档刻意<b>没有</b>这个上限：走够 6 格就停吗？不 ——
+            // 还在挨烫就继续走。它唯一的收尾条件是不再受伤（计时器到点）。
+            if (!frightened.tfcicys$isHazardFlee()
+                    && this.horse.position().distanceToSqr(fright) >= this.radius * this.radius) {
                 frightened.tfcicys$stopFleeing();
                 return false;
             }

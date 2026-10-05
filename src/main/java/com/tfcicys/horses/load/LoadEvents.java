@@ -4,6 +4,7 @@ import com.tfcicys.horses.TfcIcysHorses;
 
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.animal.horse.AbstractHorse;
 import net.minecraft.world.entity.player.Player;
 import net.minecraftforge.event.entity.EntityMountEvent;
 import net.minecraftforge.event.entity.living.LivingEvent;
@@ -29,6 +30,13 @@ public final class LoadEvents {
     @SubscribeEvent
     public static void onLivingTick(LivingEvent.LivingTickEvent event) {
         final LivingEntity entity = event.getEntity();
+
+        // 诊断：马匹在两侧都要采样。服务端算得对、客户端属性没同步过去（界面看不到数字），
+        // 和服务端根本没算，是两个完全不同的问题，必须能分辨。
+        if (entity instanceof AbstractHorse horse) {
+            LoadDebug.dumpHorse(horse);
+        }
+
         if (entity.level().isClientSide()) {
             return;
         }
