@@ -1,6 +1,7 @@
 package com.tfcicys.horses.load;
 
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.slf4j.Logger;
 
@@ -38,6 +39,10 @@ import net.minecraftforge.items.IItemHandler;
 public final class LoadManager {
 
     private static final Logger LOGGER = LogUtils.getLogger();
+
+    /** 货箱读取失败每种只报告一次：拉车中的实体是每 5 tick 读一次的，不能刷屏。 */
+    private static final AtomicBoolean CONTAINER_FAILURE_LOGGED = new AtomicBoolean(false);
+    private static final AtomicBoolean HANDLER_FAILURE_LOGGED = new AtomicBoolean(false);
 
     /** 马匹负重上限的修饰符。 */
     private static final UUID ANIMAL_SPEED_UUID = UUID.fromString("3c1a7e90-5b24-4d18-9f60-2ab7c0d4e815");
@@ -197,7 +202,10 @@ public final class LoadManager {
         } catch (final Throwable t) {
             // 读容器失败不应该让整辆车的牵引逻辑崩掉，但必须留下痕迹——
             // 静默吞异常会让「货物重量算不出来」变成一个无从排查的黑洞。
-            LOGGER.warn("[terras_horsies] 通过 Container 读取马车 {} 货箱失败", cart, t);
+            // 拉车中的实体是每 5 tick 读一次的，所以每种失败只报一次。
+            if (CONTAINER_FAILURE_LOGGED.compareAndSet(false, true)) {
+                LOGGER.warn("[terras_horsies] 通过 Container 读取马车 {} 货箱失败，后续同类失败不再重复报告", cart, t);
+            }
         }
         try {
             final var handlerOpt = cart.getCapability(ForgeCapabilities.ITEM_HANDLER);
@@ -208,7 +216,9 @@ public final class LoadManager {
                 }
             }
         } catch (final Throwable t) {
-            LOGGER.warn("[terras_horsies] 通过 ITEM_HANDLER 读取马车 {} 货箱失败", cart, t);
+            if (HANDLER_FAILURE_LOGGED.compareAndSet(false, true)) {
+                LOGGER.warn("[terras_horsies] 通过 ITEM_HANDLER 读取马车 {} 货箱失败，后续同类失败不再重复报告", cart, t);
+            }
         }
         return best;
     }
