@@ -35,6 +35,15 @@ public final class TFCICYSConfig {
     public static final int DEFAULT_CREATURE_LOAD = 1000;
 
     /**
+     * 拉车生物的负重刷新间隔出厂默认值（tick）。
+     *
+     * <p>5 tick = 0.25 秒。同样需要一个兜底入口：这个值是在
+     * {@code LivingTickEvent} 里读的，虽然那时配置早已加载，
+     * 但读配置项本身会抛 {@code IllegalStateException}，不能让它有机会崩在 tick 里。
+     */
+    public static final int DEFAULT_CART_REFRESH_TICKS = 5;
+
+    /**
      * 环境伤害逃跑默认忽略的伤害类型。
      *
      * <p>判断标准只有一条：<b>跑开能不能改善处境</b>。溺水、摔落、饥饿、虚空、
@@ -83,6 +92,21 @@ public final class TFCICYSConfig {
             return COMMON.creatureDefaultLoad.get();
         } catch (final IllegalStateException notLoadedYet) {
             return DEFAULT_CREATURE_LOAD;
+        }
+    }
+
+    /**
+     * 拉车生物的负重刷新间隔（tick），读取失败时退回 {@value #DEFAULT_CART_REFRESH_TICKS}。
+     *
+     * <p>这个值在 {@code LivingTickEvent} 里读，那时配置早已加载，{@code catch}
+     * 只是防御性的——但读配置项抛异常会让每一次 tick 都炸，不能给它机会。
+     * 同时夹到 ≥1，避免有人手改配置文件写成 0 造成每 tick 取模除零。
+     */
+    public static int cartRefreshIntervalOrFallback() {
+        try {
+            return Math.max(1, COMMON.cartRefreshIntervalTicks.get());
+        } catch (final IllegalStateException notLoadedYet) {
+            return DEFAULT_CART_REFRESH_TICKS;
         }
     }
 
@@ -615,6 +639,7 @@ public final class TFCICYSConfig {
         public final ForgeConfigSpec.IntValue cartBaseLoad;
         public final ForgeConfigSpec.DoubleValue cartCargoFactor;
         public final ForgeConfigSpec.DoubleValue draftCartFactor;
+        public final ForgeConfigSpec.IntValue cartRefreshIntervalTicks;
 
         // ── 骑乘 ────────────────────────────────────────────────────
         public final ForgeConfigSpec.IntValue riderLoad;
@@ -718,6 +743,16 @@ public final class TFCICYSConfig {
             draftCartFactor = b
                     .comment("Whole-cart factor when a DRAFT horse pulls it. 0.4 = only 40% is felt. No effect on players.")
                     .defineInRange("draftCartFactor", 0.4D, 0.0D, 10.0D);
+
+            cartRefreshIntervalTicks = b
+                    .comment("How often (in ticks) a creature that is pulling a cart re-reads the cart cargo.",
+                            "The cargo lives in a container a player edits through the cart GUI, so it is polled.",
+                            "5 = 0.25s: loading the cart is felt by the animal at once, with no visible delay.",
+                            "Measured cost of one poll: ~0.5us for a full cart (~5.5us even for a deliberately",
+                            "exaggerated cart stuffed with nested containers). Even 20 loaded carts polled this",
+                            "often stay around 0.1-1% of a single 50ms server tick, so raising this value is",
+                            "only worth it if you want to shave off that last fraction of a percent.")
+                    .defineInRange("cartRefreshIntervalTicks", 5, 1, 40);
 
             b.pop();
 

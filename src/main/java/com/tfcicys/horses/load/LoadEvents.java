@@ -1,5 +1,6 @@
 package com.tfcicys.horses.load;
 
+import com.tfcicys.horses.TFCICYSConfig;
 import com.tfcicys.horses.TfcIcysHorses;
 
 import net.minecraft.world.entity.Entity;
@@ -50,18 +51,30 @@ public final class LoadEvents {
 
         final long time = entity.level().getGameTime();
 
-        // 拉车中的生物盯得更紧：车厢里的货是玩家在界面上随时搬进搬出的，
+        // 拉车中的实体盯得更紧：车厢里的货是玩家在界面上随时搬进搬出的，
         // 沿用 10/20 tick 的节流会让「装上货 → 马被压慢」明显慢一拍。
+        // 间隔可配（load.cart.cartRefreshIntervalTicks），默认 5 tick = 0.25 秒。
         // 配合 updateAnimal / setAddition 里「只在数值变化时才写属性」，
-        // 5 tick（0.25 秒）一次几乎不产生额外的同步包。
-        final boolean pulling = CartPullRegistry.cartOf(entity) != null;
+        // 这个频率几乎不产生额外的同步包，实测开销见 DEV_NOTES 14.13。
+        if (CartPullRegistry.cartOf(entity) != null) {
+            final int interval = TFCICYSConfig.cartRefreshIntervalOrFallback();
+            if (time % interval != 0L) {
+                return;
+            }
+            if (entity instanceof Player player) {
+                LoadManager.updatePlayer(player);
+            } else {
+                LoadManager.updateAnimal(entity);
+            }
+            return;
+        }
 
         if (entity instanceof Player player) {
             // 玩家：补上马车与骑乘份额。
-            if (pulling ? time % 5L == 0L : time % 10L == 0L) {
+            if (time % 10L == 0L) {
                 LoadManager.updatePlayer(player);
             }
-        } else if (pulling ? time % 5L == 0L : time % 20L == 0L) {
+        } else if (time % 20L == 0L) {
             // 生物：整条链路由我们接管。
             LoadManager.updateAnimal(entity);
         }

@@ -1168,6 +1168,7 @@ maxLoadAttr.setBaseValue(LevelUtils.getLevel(player, "endurance") * 100.0 + 300)
     cartBaseLoad = 512            # 固定自重，不减免
     cartCargoFactor = 0.6         # 货物系数（减轻 40%）
     draftCartFactor = 0.4         # 挽马拉车系数
+    cartRefreshIntervalTicks = 5  # 拉车生物重新读车厢货物的间隔（tick），1~40
 [rider]
     riderLoad = 350               # 骑手自身体重
     draftRiderLoad = 250          # 挽马的骑手自身体重
@@ -1290,6 +1291,76 @@ return Math.max(direct, synced);
 
 它只在**这辆车的读数变化时**输出一行，所以装货、清空会形成一条干净的阶梯；
 若装货后这行一直不动，说明三路来源都没读到内容，问题在更上游。
+
+### 14.13 刷新频率的依据：把开销实测出来，而不是估
+
+14.12 把拉车实体的刷新从 20 tick 提到 5 tick，于是必须回答一个问题：
+**这会不会给服务端造成压力？** 下面是可复算的依据，不是感觉。
+
+#### 一次刷新到底干了什么
+
+`itemWeight` 转调 More Attributes 的 `ItemUtils.getWeight`，
+按它的字节码（`javap -c org.mantodea.more_attributes.utils.ItemUtils`）逐条数是：
+
+| 步骤 | 说明 | 是否每格都做 |
+|---|---|---|
+| 1 | `stack.isEmpty()` | 是（空槽到此为止） |
+| 2 | `ForgeRegistries.ITEMS.getKey(item)` | 仅非空槽 |
+| 3 | `ResourceLocation.toString()` ← **每次分配一个小 String** | 仅非空槽 |
+| 4 | `ItemWeights.get(String)`（HashMap 查表） | 仅非空槽 |
+| 5 | 未命中时走 TFC `ItemSizeManager.get` + 能力查询 + 整数运算 | 仅非空槽 |
+| 6 | `getCount()` 相乘，容器类物品再递归 `getContentsWeight` | 仅非空槽 |
+
+所以整个循环是 **O(格数) 次 `isEmpty` + O(非空格数) 次查表**，没有流、没有遍历全物品表。
+
+#### 实测（JDK 17，`-XX:+UseSerialGC`，各 5 轮取最快）
+
+基准代码放在仓库的 `bench/` 下，是把上表里**最贵的那几步**（第 2~4、6 步：
+一次 String 分配 + HashMap 查表 + 分支 + 计数相乘）单独压出来的，可自行重跑：
+
+```powershell
+cd bench
+& "$env:JAVA_HOME\bin\javac" -encoding UTF-8 WeightBench.java WeightBenchDeep.java
+& "$env:JAVA_HOME\bin\java" -Dfile.encoding=UTF-8 -XX:+UseSerialGC WeightBench        # 普通满载车厢
+& "$env:JAVA_HOME\bin\java" -Dfile.encoding=UTF-8 -XX:+UseSerialGC WeightBenchDeep    # 夸张的嵌套容器车厢
+```
+
+| 场景 | 一次刷新 | 说明 |
+|---|---|---|
+| 54 格全满（石头、工具这类普通物品） | **0.46 ~ 0.48 µs** | 约 9 ns/格（两次运行） |
+| 54 格全满、2 层嵌套、每层 9 件 | **5.5 µs** | 刻意夸大的上限，真实车厢造不出来 |
+
+换算成对服务端的占用（5 tick = 每秒 4 次刷新；50 ms 是一个 tick 的预算）：
+
+| 同时拉车的马车数 | 普通满载 | 夸张嵌套 |
+|---|---|---|
+| 1 | 1.9 µs/s = 0.004% tick | 22 µs/s = 0.044% tick |
+| 5 | 9.3 µs/s = 0.019% tick | 110 µs/s = 0.22% tick |
+| 20 | 37 µs/s = 0.074% tick | 439 µs/s = 0.88% tick |
+| 100 | 185 µs/s = 0.37% tick | 2194 µs/s = 4.4% tick |
+
+结论：**20 辆车同时拉的情况下也不到 1% 的一个 tick**。
+作为参照，一只原版僵尸每 tick 的 `serverAiStep`（目标选择器逐个求值、
+寻路、`sensing` 扫描附近玩家）是几十微秒量级，**单只僵尸一个 tick 就比
+上面 20 辆车的每秒总开销还多**。而且这笔开销只在**有玩家真的把车挂上**时发生，
+没挂车时走的是原来的 20 tick / 10 tick 通道，成本不变。
+
+#### 反而省了网络流量
+
+频率提高真正的风险不在 CPU，而在**属性写入**：`setBaseValue` 与增删修饰符
+都会把属性标记为脏，触发一次 `ClientboundUpdateAttributesPacket`。
+改之前每次刷新都无条件写一遍——10 只拉车生物在 20 tick 频率下就已经是
+每秒 10 个同步包，提到 5 tick 会变成每秒 40 个。
+
+所以 14.12 同时把 `updateAnimal` / `setAddition` 改成**只在数值变化时才写**：
+车厢内容不动的时候，一次刷新是 **0 次属性写入、0 个同步包**，
+只有玩家真的搬货的那一刻才有一次更新。净效果是**稳态下网络流量比以前更低**。
+
+#### 还是想更省？
+
+刷新间隔做成了配置项 `load.cart.cartRefreshIntervalTicks`（默认 5，范围 1~40）。
+调大它换来的是「装货到马被压慢」之间可见的延迟：40 tick = 2 秒，
+手快的玩家能明显感觉到。按上表的数据，**没有任何需要调它的理由**。
 
 ---
 

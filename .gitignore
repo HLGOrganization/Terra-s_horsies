@@ -37,3 +37,6 @@ server-log.txt
 *-log.txt
 _tmp*/
 *.bak
+
+# ── 微基准的编译产物（bench/*.java 本身要进仓库，是开销结论的依据）──────────
+bench/*.class
