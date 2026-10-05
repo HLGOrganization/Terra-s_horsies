@@ -1222,6 +1222,75 @@ JVM 只在真正执行到那条字节码时才解析常量池，因此上游缺�
 （这些判定在 `LivingTickEvent` 里按实体逐个命中），以及**在 `ModList`
 尚未就绪时不缓存结果**——否则会把「暂时不知道」错记成「模组缺席」而永不恢复。
 
+### 14.12 货物重量必须实时反映车厢内容（一次真实故障）
+
+**现象**（实测反馈）：马拉着车时，玩家打开车厢界面往里装货，**马的负重不变**；
+把车**清空**，马的负重却**立刻**变得正确；之后再装货，马得到的仍然是
+「上次清空之前」的那个重量。要放下车再挂上才刷新，等于要玩家手动去戳一下。
+
+**根因**：`cargoWeightOf` 里那个「最后一次成功读到的值」兜底：
+
+```java
+final double sum = readCargoDirect(cart);
+if (sum > 0.0D) { lastKnownCargo = sum; return sum; }
+return cargoSummaryNonEmpty(cart) ? lastKnownCargo : 0.0D;   // ← 冻结点
+```
+
+它把两种「读到 0」混为一谈，于是出现了两条互不相同的行为：
+
+| 车厢实际状态 | 直读 | 同步摘要 | 走到哪条分支 | 结果 |
+|---|---|---|---|---|
+| 有货 | 0 | 非空 | 沿用旧值 | **冻在上一次成功读取那一刻** |
+| 空 | 0 | 空 | 归零 | 立刻正确 |
+
+「清空立刻生效、装货纹丝不动」正是这张表的表现，而不是"读取有延迟"。
+
+它还有第二个毛病：`lastKnownCargo` 是**整个模组共用的一个静态值**，
+同时存在两辆以上马车时会互相串味（A 车读到 4608，B 车读到 0 时就会沿用 4608）。
+
+**先把"界面写入的是不是同一份数据"排除掉**（这是必须先确认的，否则会改错地方）：
+
+- `SupplyCartContainer` 的构造里 `cartInv = cart.inventory` —— 直接引用
+  `AbstractDrawnInventoryEntity.inventory` 这个字段，没有副本；
+- `TFCSupplyCartEntity` 的 `Container` 实现就是转调同一个 handler：
+  `getContainerSize()` → `inventory.getSlots()`，
+  `getItem(i)` → `inventory.getStackInSlot(i)`，
+  `setItem(i, s)` → `inventory.setStackInSlot(i, s)`（javap 逐条核对）；
+- `AbstractDrawnInventoryEntity.<init>` 里 `this.inventory = initInventory()`
+  是**当场**赋值，不是懒初始化，所以任何时刻读都不会是 null。
+
+也就是说：**界面写入的就是实体读的那一份，直读本身是实时的**。
+问题只出在那段兜底逻辑上。
+
+**修法**：改成多路来源取最大值，并且**不保留任何跨 tick 状态**：
+
+```java
+final double direct = readCargoDirect(cart);   // Container + ITEM_HANDLER 能力，取大者
+final double synced = syncedCargoWeight(cart); // 同步摘要 getCargo()
+return Math.max(direct, synced);
+```
+
+- 任何一路读到内容，都不会被另一路读到 0 压掉；
+- 空车必然是 0（三路都空），不再需要"猜"；
+- 摘要的数量会被上游 `setCount(min(maxStackSize, count/k))` 截断、可能**低估**，
+  所以只把它当作补充来源、与直读取最大值，绝不用它覆盖更大的直读结果。
+
+**顺带两处调整**：
+
+1. 正在拉车的实体刷新频率从 10/20 tick 提到 **5 tick（0.25 秒）**，
+   车厢里的货是玩家随时搬进搬出的，否则「装货 → 马被压慢」还是慢一拍。
+2. `updateAnimal` / `setAddition` 改为**只在数值变化时**才写属性/修饰符。
+   属性一动就会被标记为脏并触发一次同步包，频率提高四倍之后这个判断很重要。
+
+**怎么验证**：用 `-Dterras_horsies.debugLoad=true` 启动，日志里会出现
+
+```
+[terras_horsies/debug] cargo side=SERVER cart=...#... direct=4608 synced=4608 result=4608 | containerSlots=27 summarySlots=5/27
+```
+
+它只在**这辆车的读数变化时**输出一行，所以装货、清空会形成一条干净的阶梯；
+若装货后这行一直不动，说明三路来源都没读到内容，问题在更上游。
+
 ---
 
 ## 15. TFC 金属马铠的外观

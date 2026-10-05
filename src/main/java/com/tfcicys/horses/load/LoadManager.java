@@ -39,16 +39,6 @@ public final class LoadManager {
 
     private static final Logger LOGGER = LogUtils.getLogger();
 
-    /**
-     * 最后一次成功读到的货物重量。
-     *
-     * <p>马车货箱是个 {@code ItemStackHandler}，实测会在相邻 tick 之间
-     * 返回「有货」与「空」两种结果（同一实体 id，1 tick 内 4608 → 0）。
-     * 这是货箱读取的不一致，不是玩家真的把货搬空了。
-     * 配合同步摘要把它与「真的空了」区分开，见 {@link #cargoWeightOf}。
-     */
-    private static double lastKnownCargo;
-
     /** 马匹负重上限的修饰符。 */
     private static final UUID ANIMAL_SPEED_UUID = UUID.fromString("3c1a7e90-5b24-4d18-9f60-2ab7c0d4e815");
     private static final UUID ANIMAL_JUMP_UUID = UUID.fromString("7d2b4f61-8a35-4c92-b1e7-50f3a9c6d208");
@@ -164,83 +154,108 @@ public final class LoadManager {
         return base + cargo * cargoFactor;
     }
 
-    /** 车厢内货物的 More Attributes 重量合计。 */
+    /**
+     * 车厢内货物的 More Attributes 重量合计。
+     *
+     * <p><b>多路来源取最大值</b>：任何一路读到内容，都不会被另一路读到 0 压掉。
+     * 三路来源是：
+     * <ol>
+     *   <li>{@code Container} 直读 —— 补给车实现了这个接口，服务端读到的就是
+     *       实体自己的 {@code ItemStackHandler}。玩家打开的界面写的也是同一个对象
+     *       （{@code SupplyCartContainer} 的构造直接引用
+     *       {@code AbstractDrawnInventoryEntity.inventory}），所以这条是实时的。</li>
+     *   <li>{@code ITEM_HANDLER} 能力 —— 没有实现 {@code Container} 的车走这条。</li>
+     *   <li>同步摘要 {@code getCargo()} —— 上游在货箱内容变化时刷新的
+     *       {@code EntityDataAccessor} 列表，客户端也拿得到。</li>
+     * </ol>
+     *
+     * <p>这里<b>刻意不保存任何跨 tick 的状态</b>。旧版本维护过一个
+     * 「最后一次成功读到的值」，读到 0 且摘要非空时就沿用它。那个兜底有两个后果：
+     * <ul>
+     *   <li>负重会<b>冻在上一次成功读取的那一刻</b>：往车里加东西，马的负重纹丝不动；
+     *       把车清空，反而立刻变得正确（因为空车走的是另一条分支）。</li>
+     *   <li>它是<b>整个模组共用一个静态值</b>，同时存在两辆以上马车时会互相串味。</li>
+     * </ul>
+     * 现在改为按来源取最大值：空车就是 0，装货就是当前值，不需要猜。
+     */
     public static double cargoWeightOf(Entity cart) {
-        final double sum = readCargoDirect(cart);
-        if (sum > 0.0D) {
-            // 读到了就是准的，记下来备用。
-            lastKnownCargo = sum;
-            return sum;
-        }
-        // 直接读取为 0 有两种可能，必须区分：
-        //   ① 车真的空了 —— 玩家把货搬走了；
-        //   ② 货箱这一次读不到内容 —— ItemStackHandler 会在服务端/客户端的
-        //      不同实例之间给出不一致的结果。
-        //
-        // 用同步数据 CARGO 当权威判据：它由上游在货箱内容变化时刷新，
-        // 两端一致，且玩家搬空时必然同步变成全空。所以——
-        //   CARGO 还有货  → 属于 ②，沿用最后已知值
-        //   CARGO 全空    → 属于 ①，归零
-        //
-        // 【注意】这里刻意不设时间窗口。早先版本给了 60 tick 宽限，
-        // 结果因为 lastKnownCargoTick 在持续读 0 时不再更新，宽限一到
-        // 负重就被打回裸车重（实测表现为「生效约 4 秒后又变轻」）。
-        // 只要 CARGO 没清空，就不该认为玩家卸了货。
-        return cargoSummaryNonEmpty(cart) ? lastKnownCargo : 0.0D;
+        final double direct = readCargoDirect(cart);
+        final double synced = syncedCargoWeight(cart);
+        final double result = Math.max(direct, synced);
+        LoadDebug.cargoRead(cart, direct, synced, result);
+        return result;
     }
 
-    /** 直接读容器，不做任何补偿。 */
+    /** 直接从容器 / 能力读，两条都试，取较大的那个。 */
     private static double readCargoDirect(Entity cart) {
-        double sum = 0.0D;
+        double best = 0.0D;
         try {
             // 补给车实现了 Container；动物车没有货箱，会走到下面的能力查询并返回 0。
             if (cart instanceof net.minecraft.world.Container container) {
-                for (int i = 0; i < container.getContainerSize(); i++) {
-                    sum += MoreAttributesApi.itemWeight(container.getItem(i));
-                }
-                return sum;
-            }
-            final var handlerOpt = cart.getCapability(ForgeCapabilities.ITEM_HANDLER);
-            if (handlerOpt.isPresent()) {
-                final IItemHandler handler = handlerOpt.orElse(null);
-                if (handler != null) {
-                    for (int i = 0; i < handler.getSlots(); i++) {
-                        sum += MoreAttributesApi.itemWeight(handler.getStackInSlot(i));
-                    }
-                }
+                best = Math.max(best, sumContainer(container));
             }
         } catch (final Throwable t) {
             // 读容器失败不应该让整辆车的牵引逻辑崩掉，但必须留下痕迹——
             // 静默吞异常会让「货物重量算不出来」变成一个无从排查的黑洞。
-            LOGGER.warn("[terras_horsies] 读取马车 {} 货箱失败，本车货物重量按 0 计", cart, t);
+            LOGGER.warn("[terras_horsies] 通过 Container 读取马车 {} 货箱失败", cart, t);
+        }
+        try {
+            final var handlerOpt = cart.getCapability(ForgeCapabilities.ITEM_HANDLER);
+            if (handlerOpt.isPresent()) {
+                final IItemHandler handler = handlerOpt.orElse(null);
+                if (handler != null) {
+                    best = Math.max(best, sumHandler(handler));
+                }
+            }
+        } catch (final Throwable t) {
+            LOGGER.warn("[terras_horsies] 通过 ITEM_HANDLER 读取马车 {} 货箱失败", cart, t);
+        }
+        return best;
+    }
+
+    private static double sumContainer(net.minecraft.world.Container container) {
+        double sum = 0.0D;
+        for (int i = 0; i < container.getContainerSize(); i++) {
+            sum += MoreAttributesApi.itemWeight(container.getItem(i));
+        }
+        return sum;
+    }
+
+    private static double sumHandler(IItemHandler handler) {
+        double sum = 0.0D;
+        for (int i = 0; i < handler.getSlots(); i++) {
+            sum += MoreAttributesApi.itemWeight(handler.getStackInSlot(i));
         }
         return sum;
     }
 
     /**
-     * 用反射读同步数据 {@code getCargo()}，判断摘要里是否还有东西。
+     * 同步摘要里的货物重量。
      *
      * <p>走反射是因为 {@code TFCSupplyCartEntity} 属于可选依赖，不能出现在签名或
      * 常量池引用里，否则 AstikorCarts 缺席时会 {@code NoClassDefFoundError}。
      *
      * <p>摘要的数量会被上游 {@code setCount(min(maxStackSize, count/k))} 截断，
-     * 所以<b>不用它算重量</b>，只用来回答「车里到底还有没有货」。
+     * 所以它可能<b>低估</b>重量——因此只作为「直读为 0 时的补充来源」，
+     * 与直读取最大值，绝不会用它去覆盖一个更大的直读结果。
      */
-    private static boolean cargoSummaryNonEmpty(Entity cart) {
+    private static double syncedCargoWeight(Entity cart) {
         try {
             final java.lang.reflect.Method getCargo = cart.getClass().getMethod("getCargo");
             final Object cargo = getCargo.invoke(cart);
             if (cargo instanceof java.util.List<?> list) {
+                double sum = 0.0D;
                 for (final Object element : list) {
                     if (element instanceof ItemStack stack && !stack.isEmpty()) {
-                        return true;
+                        sum += MoreAttributesApi.itemWeight(stack);
                     }
                 }
+                return sum;
             }
         } catch (final Throwable ignored) {
-            // 不是补给车（没有 getCargo），或反射被拒：当作「无法确认」。
+            // 不是补给车（没有 getCargo），或反射被拒：这一路就没有贡献。
         }
-        return false;
+        return 0.0D;
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -275,10 +290,23 @@ public final class LoadManager {
         }
 
         // 生物这边没有竞争者，可以直接写基础值。
-        maxInstance.setBaseValue(capOf(entity));
-        curInstance.setBaseValue(loadOf(entity));
+        //
+        // 只在数值真的变了才写：拉车的生物现在每 5 tick 刷新一次，
+        // 无条件 setBaseValue 会把属性标记为脏、每 5 tick 发一次同步包，
+        // 而绝大多数时候负重根本没变。
+        final double cap = capOf(entity);
+        final double load = loadOf(entity);
+        final boolean changed = maxInstance.getBaseValue() != cap || curInstance.getBaseValue() != load;
+        if (changed) {
+            maxInstance.setBaseValue(cap);
+            curInstance.setBaseValue(load);
+        }
 
-        applyPenalty(entity, curInstance.getValue(), maxInstance.getValue());
+        // 修饰符缺失时也要重挂（例如刚上完马、或实体刚被创建）。
+        final AttributeInstance speed = entity.getAttribute(Attributes.MOVEMENT_SPEED);
+        if (changed || speed == null || speed.getModifier(ANIMAL_SPEED_UUID) == null) {
+            applyPenalty(entity, curInstance.getValue(), maxInstance.getValue());
+        }
     }
 
     /**
@@ -318,11 +346,26 @@ public final class LoadManager {
         setAddition(instance, PLAYER_CART_LOAD_UUID, "tfcicys:cart_load", cartLoad);
     }
 
+    /**
+     * 把某个 UUID 的 ADDITION 追加量设成 {@code amount}（≤0 表示不追加）。
+     *
+     * <p>只有在数值真的变化时才动修饰符：{@code addTransientModifier} /
+     * {@code removeModifier} 都会把属性标记为脏并触发一次同步包，
+     * 而玩家侧是每 10 tick 跑一次的，绝大多数时候追加量没变。
+     */
     private static void setAddition(AttributeInstance instance, UUID id, String name, double amount) {
-        instance.removeModifier(id);
-        if (amount > 0.0D) {
-            instance.addTransientModifier(new AttributeModifier(id, name, amount, AttributeModifier.Operation.ADDITION));
+        final AttributeModifier existing = instance.getModifier(id);
+        if (amount <= 0.0D) {
+            if (existing != null) {
+                instance.removeModifier(id);
+            }
+            return;
         }
+        if (existing != null && existing.getAmount() == amount) {
+            return;
+        }
+        instance.removeModifier(id);
+        instance.addTransientModifier(new AttributeModifier(id, name, amount, AttributeModifier.Operation.ADDITION));
     }
 
     /**

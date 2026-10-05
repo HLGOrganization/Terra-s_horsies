@@ -19,7 +19,11 @@ import net.minecraftforge.fml.common.Mod;
  * 是因为 More Attributes 每 tick 会 {@code setBaseValue} 覆盖基础值——
  * 但我们的追加量走的是 ADDITION 修饰符，不受覆盖影响，所以 10 tick 一次足够。
  *
- * <p>上下马是唯一需要「立刻」生效的时刻：若等到下一个节流窗口，
+ * <p>例外是<b>正在拉车的实体</b>：它的负重取决于车厢里有什么，而那是玩家
+ * 在界面上随时搬进搬出的，必须贴着看（5 tick），否则「装货 → 马被压慢」
+ * 会慢一拍，甚至因为读到旧值而看起来完全没生效。详见 {@link LoadManager#cargoWeightOf}。
+ *
+ * <p>上下马是另一个需要「立刻」生效的时刻：若等到下一个节流窗口，
  * 玩家会看到坐骑的速度慢一拍才变，或者下车后残留一瞬间的减速。
  */
 @Mod.EventBusSubscriber(modid = TfcIcysHorses.MOD_ID)
@@ -46,12 +50,18 @@ public final class LoadEvents {
 
         final long time = entity.level().getGameTime();
 
+        // 拉车中的生物盯得更紧：车厢里的货是玩家在界面上随时搬进搬出的，
+        // 沿用 10/20 tick 的节流会让「装上货 → 马被压慢」明显慢一拍。
+        // 配合 updateAnimal / setAddition 里「只在数值变化时才写属性」，
+        // 5 tick（0.25 秒）一次几乎不产生额外的同步包。
+        final boolean pulling = CartPullRegistry.cartOf(entity) != null;
+
         if (entity instanceof Player player) {
             // 玩家：补上马车与骑乘份额。
-            if (time % 10L == 0L) {
+            if (pulling ? time % 5L == 0L : time % 10L == 0L) {
                 LoadManager.updatePlayer(player);
             }
-        } else if (time % 20L == 0L) {
+        } else if (pulling ? time % 5L == 0L : time % 20L == 0L) {
             // 生物：整条链路由我们接管。
             LoadManager.updateAnimal(entity);
         }
