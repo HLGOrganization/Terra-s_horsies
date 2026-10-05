@@ -2485,6 +2485,100 @@ public void setBaby(boolean baby) {
 
 ---
 
+## 22. 启动崩溃复盘：`@Inject` 的回调类型
+
+### 现象
+
+把某一版 jar 放进整合包后，游戏**在启动早期**（进主菜单之前）直接崩，
+`latest.log` 里的关键字是：
+
+```
+[FATAL] [mixin/]: Mixin apply failed terras_horsies.mixins.json:AbstractHorseTamingMixin
+        -> net.minecraft.world.entity.animal.horse.AbstractHorse:
+org.spongepowered.asm.mixin.injection.throwables.InvalidInjectionException:
+Invalid descriptor on terras_horsies.mixins.json:AbstractHorseTamingMixin
+->@Inject::tfcicys$promoteTfcFamiliarity(Lnet/minecraft/world/entity/player/Player;
+Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V!
+CallbackInfoReturnable is required!
+```
+
+触发点在 `Bootstrap.bootStrap()` → `Blocks.<clinit>` —— 也就是说，
+**`AbstractHorse` 是在启动早期被加载的**（不是等玩家骑马时才加载）。
+这也是为什么这个错误表现为"启动即崩"，而不是运行到某个功能才出问题。
+
+### 根因
+
+`tameWithName` 的签名是 `boolean tameWithName(Player)`（obf 名 `m_30637_`，
+描述符结尾是 `)Z`）——**它有返回值**。Mixin 的规则：
+
+| 目标方法 | 处理方法最后一个参数必须是 |
+| --- | --- |
+| 返回 `void` | `CallbackInfo` |
+| 有返回值 | `CallbackInfoReturnable<T>` |
+
+规则由 `CallbackInjector.inject` 在**应用期**（apply）执行，不在编译期。
+写成 `CallbackInfo` 时编译一切正常、注解处理器也不吭声
+（注解处理器只核对"目标方法找不找得到"，不核对回调类型），
+于是问题被推迟到游戏启动才炸。`getTemper()I` 那一处本来就是
+`CallbackInfoReturnable<Integer>`，是对的；错的只有 `tameWithName` 这一处。
+
+修法就是把处理方法的最后一个参数换成 `CallbackInfoReturnable<Boolean>`，
+并去掉 `CallbackInfo` 的 import。验收看两处字节码/资源即可：
+
+```
+private void tfcicys$promoteTfcFamiliarity(net.minecraft.world.entity.player.Player,
+        org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable<java.lang.Boolean>);
+```
+```
+"tameWithName": "Lnet/minecraft/world/entity/animal/horse/AbstractHorse;m_30637_(Lnet/minecraft/world/entity/player/Player;)Z"
+```
+
+### 静态自检：`tools/check_mixin_injectors.py`
+
+这类错误**编译期完全看不出来**，所以补了一个不依赖游戏的自检脚本，
+在打包之后对着 jar 里的 refmap 核对每个 `@Inject`：
+
+1. 目标有返回值 ⇒ 处理方法的最后一个参数必须是 `CallbackInfoReturnable`；
+   目标是 `void` ⇒ 必须是 `CallbackInfo`；
+2. 处理方法的参数个数 == 目标参数个数 + 1；
+3. 处理方法里调用了 `setReturnValue` ⇒ 注解必须带 `cancellable = true`
+   （扫描范围只到一个 `@Inject` 为止，否则会扫进下一个方法造成误报）；
+4. jar 里的 mixin 类和 `terras_horsies.mixins.json` 的登记**双向**一致 ——
+   漏登记不报错，只是那个 mixin 永远不生效；登记了但类不存在则启动就崩。
+
+```powershell
+python tools\check_mixin_injectors.py            # 默认读 build/libs 与 src 下的 mixin 目录
+```
+
+脚本经过**自证**：对着出事的旧版源码跑会精确报出
+`tfcicys$promoteTfcFamiliarity 的目标 tameWithName(...)Z 有返回值，回调必须是 CallbackInfoReturnable`，
+对着修好的源码跑则全部通过（21 个注入点，跳过 2 个无法解析的）。
+
+**已知局限**：`remap = false` 且注解里没写内联描述符的目标（Icy、AstikorCarts 那几处）
+在 refmap 里没有记录，脚本只能打 `SKIP` —— 这几处是靠实际运行验证的，不是靠脚本。
+
+### 为什么这次没能在开发环境里跑通验证
+
+先说结论：**这个崩溃只能在有全部模组的环境里复现，本项目的 dev 运行两边都到不了那一步。**
+
+- `runServer`（专用服务端）：Icy 自己的混入在服务端就崩了 ——
+  `icys_better_horses.mixins.json:LeafPassthroughMixin` 的 `@Shadow m_60734_`
+  在目标类里定位不到，`InvalidMixinException`。与本期改动无关。
+- `runClient`（开发客户端）：`run/mods` 里放的正式版 jar 在 dev 环境里
+  用不了 —— Patchouli 的 `BookCrashHandler` 调 `Minecraft.m_91087_()` 抛
+  `NoSuchMethodError`，而且它是在**构建崩溃报告**时抛的，
+  于是真正的首因被它盖掉、日志里只剩它自己。
+
+顺带纠正上一节的实测结论：`--mixin.config` 能不能解析到，取决于
+`run/mods` 里**有没有别的正式版模组**。实测 `run/mods` 里放三个 jar（本模组 +
+Patchouli + GeckoLib）时，Mixin 那一层能读到 `terras_horsies.mixins.json`
+（日志会打印 `Compatibility level JAVA_17 specified by ...`，随后
+`Preparing terras_horsies.mixins.json (15)`）；只留本模组一个 jar 时读不到，
+报的就是上面那条"invalid or could not be read"。原因尚未完全确认，
+但**交付的 jar 不受影响**，所以不再深挖。
+
+---
+
 ## 构建
 
 ```powershell
@@ -2492,6 +2586,13 @@ $env:JAVA_HOME = 'C:\Program Files\Microsoft\jdk-17.0.8.7-hotspot'
 $env:GRADLE_USER_HOME = '<工作区>\.gradle-home'
 cd tfc-icys-horses
 .\gradlew.bat build --no-daemon
+```
+
+打包后**务必**再跑一遍 Mixin 注入点自检 —— 它能挡住"编译通过、进游戏启动即崩"
+的那一类错误（见第 22 节）：
+
+```powershell
+python tools\check_mixin_injectors.py
 ```
 
 需要 **JDK 17**。TFC 通过 Modrinth maven 依赖，注意 Modrinth 的 maven 要求用

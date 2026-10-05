@@ -111,6 +111,13 @@ $env:JAVA_HOME = '<JDK 17 路径>'
 需要 **JDK 17**。Icy 与 Jade 不在 Maven 仓库上，需自行把 jar 放进 `libs/` ——
 它们只是**编译期依赖**，不会被打包或再分发，因此也不在版本库里。版本号与细节见[开发文档](docs/DEV_NOTES.md)。
 
+打包后请再跑一遍注入点自检 —— 它能挡住"编译通过、进游戏启动即崩"的那类 mixin 错误
+（回调类型写错、参数个数不符、漏登记 mixin）：
+
+```powershell
+python tools\check_mixin_injectors.py
+```
+
 ## 授权与致谢
 
 本附属模组以 **MIT** 授权，见 [`LICENSE`](LICENSE)。

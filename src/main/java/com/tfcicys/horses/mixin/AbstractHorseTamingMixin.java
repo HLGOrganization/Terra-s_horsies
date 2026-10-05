@@ -3,7 +3,6 @@ package com.tfcicys.horses.mixin;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 import com.tfcicys.horses.taming.TfcEquineTaming;
@@ -64,10 +63,24 @@ public abstract class AbstractHorseTamingMixin {
      * 在读档时也会被调用 —— 挂在那边会让「读档」把亲密度平白推上去；
      * 而 {@code tameWithName} 只在真正驯服成功时走。
      *
+     * <p><b>回调类型不能想当然</b>：{@code tameWithName} 是
+     * {@code boolean tameWithName(Player)}，有返回值，所以必须是
+     * {@code CallbackInfoReturnable} 而不是 {@code CallbackInfo} —— 写错的话
+     * 编译期毫无提示，进游戏在 Mixin apply 阶段直接
+     * {@code InvalidInjectionException} 崩掉（本模组的 mixins.json 是 {@code required: true}，
+     * 出错不会跳过而是 FATAL）。判据看 refmap：
+     * {@code m_30637_(Lnet/minecraft/world/entity/player/Player;)Z}，结尾的 {@code Z} 就是它。
+     * 全部注入点的回调类型由 {@code tools/check_mixin_injectors.py} 静态核对。
+     *
+     * <p>这里用 {@code TAIL} 而非 {@code RETURN}：有返回值的方法在 TAIL 处栈上还有返回值，
+     * 正是靠 {@code CallbackInfoReturnable} 把它接住才不破坏栈。不需要 {@code setReturnValue}，
+     * 所以不加 {@code cancellable}。
+     *
      * <p>只加不减：已经喂得更熟的马不会被降回来。
      */
     @Inject(method = "tameWithName", at = @At("TAIL"))
-    private void tfcicys$promoteTfcFamiliarity(final Player player, final CallbackInfo ci) {
+    private void tfcicys$promoteTfcFamiliarity(final Player player,
+                                               final CallbackInfoReturnable<Boolean> cir) {
         TfcEquineTaming.promoteFamiliarity((AbstractHorse) (Object) this);
     }
 }
