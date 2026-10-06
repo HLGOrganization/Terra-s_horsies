@@ -1390,14 +1390,16 @@ initInventory()     ->  new TFCSupplyCartEntity$1(this, config.supplyCartInvento
 ```java
 // 1. 按物品聚合总数（Object2IntLinkedOpenHashMap<Item, 总数>）
 //    同时留下每种物品的一个模板堆叠
-// 2. 排序：先按总数降序，方块物品（BlockItem）排后面
+// 2. 排序：方块物品（BlockItem）优先，其次按总数降序
+//    （Redux 源码：comparingInt(e -> e.getKey() instanceof BlockItem ? 0 : 1)
+//                 .thenComparingInt(e -> -e.getIntValue())）
 // 3. limit(CARGO.size())  ← 只保留前 N 种，其余整类丢弃
 // 4. k = getSlots() / CARGO.size()                       // 例 54 / 9 = 6
 // 5. 对保留的每种：
 //        per = Math.max(1, (count + k / 2) / k)          // 四舍五入的 count/k，至少 1 格
 //        for (i = 1; i <= per && slot < CARGO.size(); i++) {
 //            copy = 模板.copy();
-//            copy.setCount(Math.min(copy.getCount(), count / i));   // 第 i 格写 count / i
+//            copy.setCount(Math.min(copy.getMaxStackSize(), count / i));   // 第 i 格写 count / i
 //        }
 ```
 
@@ -1501,6 +1503,50 @@ for (Entity cart = head; cart != null && depth < MAX_TRAIN_LENGTH; depth++) {
 [terras_horsies] 为拉车者解出的马车 tfcastikorcarts:plow#123 没有货箱（Container=false）。
 若你实际装货的是另一节车（例如中间有牵引车），请把这一行连同马车编组一起反馈——这代表负重挂到了错误的车上。
 ```
+
+#### 事实四：同一个实体 id 上可以同时存在两个车辆对象
+
+这是「马车装了 785 根原木、马却只有 512 负重」的真正成因，靠**常开审计日志**抓到：
+
+```
+17:14:54.388 [Server thread] [terras_horsies/audit] cart=...supply_cart.oak#13
+             puller=...haflinger_horse#2 container=true slots=54 direct=12560
+             inv=[0..53 全是 wood/log/pine x16]        ← 785 × 16 = 12560，完全正确
+17:14:54.413 [Server thread] [terras_horsies/audit] cart=...supply_cart.oak#13
+             puller=...haflinger_horse#2 container=true slots=54 direct=0
+             inv=[]                                    ← 相隔 25 毫秒，整箱读成空
+```
+
+**推理链**（每一步都可由日志或字节码独立验证）：
+
+1. 两行的 `cart` 都是 `supply_cart.oak#13`、`puller` 都是 `haflinger_horse#2`；
+2. 两行的 `pullerOf(cart)`（扫描索引表找「哪个拉车者对应这个对象」）都返回同一头马。
+   —— 若只有**一个**对象，索引表在这 25 ms 内不可能换过值，两次读数也就必然相同。
+   所以这 25 ms 内被写进表里的是**两个不同的对象**；
+3. 同一行的存档 NBT 兜底也读不到货（`resolved=0`），排除「某一条读取路径失效」；
+4. 上游**按实体 id 记账**，重复对象因此可能：
+   - `AstikorWorld` 内部就是 `Int2ObjectMap<AbstractDrawnEntity> pulling`；
+   - `AbstractDrawnEntity.attemptReattach()` 用 `level.getEntity(pullingId)` 找回拉车者。
+
+于是「世界里的那辆」与「索引里那份过期空壳」并存，并轮流覆盖我们的索引表：
+负重因此在**真值**与**裸车重 512** 之间抖，玩家看到的正是那个 512。
+
+**修法**：`cartLoadFor` 解出车之后，**无条件改用 `level.getEntity(id)` 返回的那辆**——
+玩家右键打开界面写进去的是它，车上渲染出货物的也是它，副本只可能是过期空壳。
+
+> 刻意**不**写成「取货物更多的那个」：那会让「车清空后仍读到旧值」的毛病回来
+> （副本里的旧货物会让 max 一直取到旧值）。要按**来源**判定，不能按**大小**判定。
+
+**取证日志**（都不需要开 `debugLoad`，只在变化时输出）：
+
+```
+[terras_horsies/audit] 车辆对象重复 cartId=13 采用世界里的对象(uuid=..., inst=1a2b3c4d)，
+                       丢弃索引里的副本(uuid=..., inst=5e6f7a8b)
+[terras_horsies/audit] cargo ... uuid=... inst=... direct=... summary=... resolved=... source=direct|nbt|memory|empty
+```
+
+`source=` 会告诉我们最终采用的是哪条路：若长期都是 `direct`，
+说明下面那条 `memory` 兜底从未生效，可以删掉。
 
 ---
 
