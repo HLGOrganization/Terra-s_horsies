@@ -10,11 +10,13 @@ import org.slf4j.Logger;
 import com.mojang.logging.LogUtils;
 import com.tfcicys.horses.TFCICYSConfig;
 import com.tfcicys.horses.TfcIcysHorses;
+import com.tfcicys.horses.mixin.AbstractHorseInventoryAccess;
 
 import net.dries007.tfc.common.entities.livestock.TFCAnimalProperties;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.util.Mth;
+import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.attributes.Attribute;
@@ -161,27 +163,36 @@ public final class LoadManager {
      * 货箱就是 {@code AbstractHorse.inventory} 这个 {@code SimpleContainer}：
      * 没箱子时 2 格（0 = 鞍、1 = 马铠），有箱子时 17 格（2..16 是那 15 格箱子）。
      *
-     * <p><b>为什么不用 {@code getSlot(i)}：</b>原版只通过它暴露 400/401（鞍与马铠）
-     * 和 499（TFC 用它放"箱子物品"本身），<b>箱子内容根本不在里面</b>——
-     * 实测第一版就是这么漏掉的。正确入口是 Forge 为马提供的
-     * {@code ITEM_HANDLER} 能力（{@code AbstractHorse.getCapability} 返回一个
-     * 包着那个 {@code SimpleContainer} 的 {@code InvWrapper}）。
-     * 因此从索引 2 开始累加：鞍与马铠是"穿戴"不是"携带"。
+     * <p><b>怎么读：</b>用 {@code @Accessor} 直接取那个字段
+     * （{@code AbstractHorseInventoryAccess}）。两种走过的弯路记在这里：
+     * <ul>
+     *   <li>{@code getSlot(i)}：原版只通过它暴露 400/401（鞍与马铠）和 499
+     *       （TFCChestedHorse 用它放"箱子物品"本身），<b>箱子内容不在里面</b>，
+     *       而且 {@code getSlot(0)} 返回 {@code SlotAccess.NULL}，「遇 NULL 就停」的循环第一步就退出；</li>
+     *   <li>Forge 的 {@code ITEM_HANDLER} 能力：它包的是同一个容器，但有
+     *       {@code itemHandler != null} 与实体存活两重前置条件，实测读出来是空。</li>
+     * </ul>
+     * 从索引 2 起累加：鞍与马铠是"穿戴"不是"携带"。
      *
      * <p>玩家不走这条：玩家背包由 More Attributes 按 {@code equip_load_current} 自己算，
      * 这里再算一遍就是同一批物品罚两次。
      */
     private static double carriedLoadOf(LivingEntity entity) {
-        if (entity instanceof Player || !(entity instanceof AbstractHorse)) {
+        if (entity instanceof Player || !(entity instanceof AbstractHorse horse)) {
+            return 0.0D;
+        }
+        if (!(horse instanceof AbstractHorseInventoryAccess access)) {
+            return 0.0D;
+        }
+        final SimpleContainer inventory = access.tfcicys$inventory();
+        if (inventory == null) {
             return 0.0D;
         }
         double sum = 0.0D;
-        final IItemHandler handler = entity.getCapability(ForgeCapabilities.ITEM_HANDLER).orElse(null);
-        if (handler != null) {
-            for (int slot = HORSE_EQUIPMENT_SLOTS; slot < handler.getSlots(); slot++) {
-                sum += MoreAttributesApi.itemWeight(handler.getStackInSlot(slot));
-            }
+        for (int slot = HORSE_EQUIPMENT_SLOTS; slot < inventory.getContainerSize(); slot++) {
+            sum += MoreAttributesApi.itemWeight(inventory.getItem(slot));
         }
+        LoadDebug.chestProbe(horse, inventory, sum);
         return sum;
     }
 

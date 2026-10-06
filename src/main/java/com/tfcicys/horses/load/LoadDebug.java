@@ -11,7 +11,9 @@ import com.mojang.logging.LogUtils;
 import com.tfcicys.horses.TFCICYSConfig;
 import com.tfcicys.horses.TfcIcysHorses;
 
+import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.attributes.Attribute;
 import net.minecraft.world.entity.ai.attributes.AttributeInstance;
@@ -171,6 +173,61 @@ public final class LoadDebug {
             LOGGER.warn("[terras_horsies/audit] 输出车辆对象信息失败", t);
         }
     }
+
+    /**
+     * 坐骑自带容器的实况探针：**只在"这匹马挂着箱子"时输出**，每匹 10 秒最多一次。
+     *
+     * <p>存在的理由：驴/骡的箱子内容到底在哪个容器、哪个索引段，光靠读上游字节码
+     * 已经判断错两次（{@code getSlot} 与 Forge 能力都读出来是空）。
+     * 所以让游戏自己报出实况：容器格数、逐格内容、以及能力那条路的对比值。
+     *
+     * <p>判定"挂着箱子"用原版 API：{@code getSlot(499)} 正是 TFC 用来放箱子物品本身的那一格。
+     * 这样不需要引用任何 TFC 类型。
+     */
+    public static void chestProbe(LivingEntity mount, SimpleContainer inventory, double weight) {
+        if (mount == null || inventory == null) {
+            return;
+        }
+        try {
+            final ItemStack chestItem = mount.getSlot(CHEST_ITEM_SLOT).get();
+            if (chestItem.isEmpty()) {
+                return;                       // 没挂箱子，不必打扰
+            }
+            final long now = mount.level().getGameTime();
+            final UUID id = mount.getUUID();
+            final Long previous = LAST_CHEST_PROBE.get(id);
+            if (previous != null && now - previous < 200L) {
+                return;
+            }
+            if (LAST_CHEST_PROBE.size() > 256) {
+                LAST_CHEST_PROBE.clear();
+            }
+            LAST_CHEST_PROBE.put(id, now);
+
+            final StringBuilder slots = new StringBuilder();
+            for (int i = 0; i < inventory.getContainerSize(); i++) {
+                final ItemStack stack = inventory.getItem(i);
+                if (!stack.isEmpty()) {
+                    if (slots.length() > 0) {
+                        slots.append(", ");
+                    }
+                    slots.append(i).append(':').append(stack.getItem()).append(" x").append(stack.getCount());
+                }
+            }
+            final var handler = mount.getCapability(net.minecraftforge.common.capabilities.ForgeCapabilities.ITEM_HANDLER);
+            LOGGER.info("[terras_horsies/audit] chest mount={}#{} chestItem={} invSize={} weight={} inv=[{}] capabilitySlots={}",
+                    mount.getType(), mount.getId(), chestItem, inventory.getContainerSize(),
+                    (long) weight, slots, handler.isPresent() ? handler.orElse(null).getSlots() : -1);
+        } catch (final Throwable t) {
+            LOGGER.warn("[terras_horsies/audit] 输出坐骑容器实况失败", t);
+        }
+    }
+
+    /** TFC 用来放"箱子物品"本身的槽位号（原版 {@code getSlot} 只在 400/401/499 返回值）。 */
+    private static final int CHEST_ITEM_SLOT = 499;
+
+    /** 每匹马上次输出容器实况的时刻。 */
+    private static final Map<UUID, Long> LAST_CHEST_PROBE = new ConcurrentHashMap<>();
 
     /** 这个世界里按 UUID 找到的是不是它本人。 */
     private static boolean inWorld(Entity cart) {

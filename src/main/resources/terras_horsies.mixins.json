@@ -18,7 +18,8 @@
     "SupplyCartOverburdenMixin",
     "AnimalCartOverburdenMixin",
     "HorsePlacementReleaseMixin",
-    "HorseWhistleReleaseMixin"
+    "HorseWhistleReleaseMixin",
+    "AbstractHorseInventoryAccess"
   ],
   "client": [
     "BhHorseHudMixin",
