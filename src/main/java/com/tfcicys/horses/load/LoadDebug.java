@@ -102,17 +102,22 @@ public final class LoadDebug {
         try {
             final String side = horse.level().isClientSide() ? "CLIENT" : "SERVER";
             final Entity cart = CartPullRegistry.cartOf(horse);
+            // 索引说这匹马拉着 cart，而 cart 的字段说的拉车者是谁？
+            // 两者不一致（drift=true）就说明索引与上游事实脱节了。
+            final Entity cartFieldPuller = cart == null ? null : fieldPullerOf(cart);
             final Attribute maxAttr = MoreAttributesApi.equipLoadMax();
             final Attribute curAttr = MoreAttributesApi.equipLoadCurrent();
             final AttributeInstance maxInstance = maxAttr == null ? null : horse.getAttribute(maxAttr);
             final AttributeInstance curInstance = curAttr == null ? null : horse.getAttribute(curAttr);
 
-            LOGGER.info("[terras_horsies/debug] side={} horse={}#{} dim={} cart={} | attrMax={} attrCur={} instMax={} instCur={} | curValue={} cap={} load={} passengers={} | moreAttributes={} astikorCarts={}",
+            LOGGER.info("[terras_horsies/debug] side={} horse={}#{} dim={} cart={} cartFieldPuller={} drift={} | attrMax={} attrCur={} instMax={} instCur={} | curValue={} cap={} load={} passengers={} | moreAttributes={} astikorCarts={}",
                     side,
                     horse.getType(),
                     horse.getId(),
                     horse.level().dimension().location(),
                     cart == null ? "null" : cart.getType() + "#" + cart.getId(),
+                    describeEntity(cartFieldPuller),
+                    cart != null && cartFieldPuller != horse,
                     maxAttr != null,
                     curAttr != null,
                     maxInstance != null,
@@ -130,63 +135,114 @@ public final class LoadDebug {
     }
 
     /**
-     * 输出一次马车货箱的读取结果（三路来源各自的读数）。
+     * 输出一次马车货箱的读取结果。
      *
      * <p>只在<b>这辆车的读数发生变化</b>时输出一行，所以开着诊断往车里搬货，
      * 日志里就是一条干净的阶梯：装货 → 数字变大，清空 → 归零。
-     * 如果装货后这里一直不动，说明三路来源都没读到内容，问题在更上游。
+     *
+     * <p>同时把「谁在拉这辆车」「货箱逐格装了什么」「摘要逐格装了什么」一起打出来。
+     * 这三样是分辨下面几种完全不同故障的唯一依据：
+     * <ul>
+     *   <li>{@code inv=[...]} 有货而 {@code direct=0} —— 重量算法没读到东西；</li>
+     *   <li>{@code inv=[]} 全空而 {@code cargo=[...]} 有货 —— 索引指向了另一辆车
+     *       （或读到的实体不是玩家在装货的那辆）；</li>
+     *   <li>{@code direct} 与 {@code summary} 相差约 {@code k} 倍 —— 正常现象，
+     *       摘要本就按 {@code count/k} 截断，这也是它不能参与算重量的原因。</li>
+     * </ul>
      */
-    public static void cargoRead(Entity cart, double direct, double synced, double result) {
+    public static void cargoRead(Entity cart, double direct, double summary) {
         if (!enabled() || cart == null) {
             return;
         }
         try {
-            final String summary = String.format("direct=%.0f synced=%.0f result=%.0f", direct, synced, result);
+            final String line = describe(false, cart)
+                    + String.format(" direct=%.0f summary=%.0f", direct, summary)
+                    + " inv=" + slotContents(cart, false)
+                    + " cargo=" + slotContents(cart, true);
             final UUID id = cart.getUUID();
-            if (summary.equals(LAST_CARGO.get(id))) {
+            if (line.equals(LAST_CARGO.get(id))) {
                 return;
             }
             if (LAST_CARGO.size() > 512) {
                 LAST_CARGO.clear();
             }
-            LAST_CARGO.put(id, summary);
-
-            LOGGER.info("[terras_horsies/debug] cargo side={} cart={}#{} {} | containerSlots={} summarySlots={}",
-                    cart.level().isClientSide() ? "CLIENT" : "SERVER",
-                    cart.getType(),
-                    cart.getId(),
-                    summary,
-                    containerSlots(cart),
-                    summarySlots(cart));
+            LAST_CARGO.put(id, line);
+            LOGGER.info("[terras_horsies/debug] cargo {}", line);
         } catch (final Throwable t) {
             LOGGER.warn("[terras_horsies/debug] 输出货箱读取结果失败", t);
         }
     }
 
-    /** Container 接口报告的槽位数；不是 Container 时返回 -1。 */
-    private static String containerSlots(Entity cart) {
-        return cart instanceof net.minecraft.world.Container container
-                ? String.valueOf(container.getContainerSize())
-                : "n/a";
+    /**
+     * 一辆车的身份描述，含「谁在拉它」。
+     *
+     * <p>{@code puller=null} 就是「索引里没有这辆车」——那马的负重会只剩乘客份额，
+     * 表现正是「太轻」。{@code puller} 与 {@code fieldPuller} 不一致则说明
+     * 索引与上游字段脱节了（{@code shouldStopPulledTick} 会绕过 {@code setPulling}
+     * 直接写字段，见 DEV_NOTES 14.14）。
+     */
+    private static String describe(boolean horseSide, Entity entity) {
+        final StringBuilder b = new StringBuilder();
+        b.append(horseSide ? "horse=" : "cart=").append(entity.getType()).append('#').append(entity.getId());
+        final Entity puller = CartPullRegistry.pullerOf(entity);
+        final Entity fieldPuller = fieldPullerOf(entity);
+        b.append(" puller=").append(describeEntity(puller));
+        b.append(" fieldPuller=").append(describeEntity(fieldPuller));
+        return b.toString();
     }
 
-    /** 同步摘要里非空的格数（上游会截断数量，这里只看「有没有货」）。 */
-    private static String summarySlots(Entity cart) {
+    private static String describeEntity(Entity entity) {
+        return entity == null ? "null" : entity.getType() + "#" + entity.getId();
+    }
+
+    /** 反射读上游 {@code pulling} 字段，用来和索引对照。 */
+    private static Entity fieldPullerOf(Entity cart) {
         try {
-            final java.lang.reflect.Method getCargo = cart.getClass().getMethod("getCargo");
-            if (getCargo.invoke(cart) instanceof java.util.List<?> list) {
-                int nonEmpty = 0;
-                for (final Object element : list) {
-                    if (element instanceof net.minecraft.world.item.ItemStack stack && !stack.isEmpty()) {
-                        nonEmpty++;
-                    }
-                }
-                return nonEmpty + "/" + list.size();
+            final java.lang.reflect.Field field = cart.getClass().getField("pulling");
+            if (field.get(cart) instanceof Entity puller) {
+                return puller;
             }
         } catch (final Throwable ignored) {
-            // 不是补给车，或反射被拒。
+            // 动物车之类的没有这个字段。
         }
-        return "n/a";
+        return null;
+    }
+
+    /** 直读货箱（{@code inv}）或读摘要（{@code cargo}）的逐格内容，形如 {@code [slot:item xN]}。 */
+    private static String slotContents(Entity cart, boolean summary) {
+        try {
+            final StringBuilder b = new StringBuilder("[");
+            if (summary) {
+                final java.lang.reflect.Method getCargo = cart.getClass().getMethod("getCargo");
+                if (getCargo.invoke(cart) instanceof java.util.List<?> list) {
+                    int i = 0;
+                    for (final Object element : list) {
+                        if (element instanceof net.minecraft.world.item.ItemStack stack && !stack.isEmpty()) {
+                            if (b.length() > 1) {
+                                b.append(", ");
+                            }
+                            b.append(i).append(':').append(stack.getItem()).append(" x").append(stack.getCount());
+                        }
+                        i++;
+                    }
+                }
+            } else if (cart instanceof net.minecraft.world.Container container) {
+                for (int i = 0; i < container.getContainerSize(); i++) {
+                    final net.minecraft.world.item.ItemStack stack = container.getItem(i);
+                    if (stack != null && !stack.isEmpty()) {
+                        if (b.length() > 1) {
+                            b.append(", ");
+                        }
+                        b.append(i).append(':').append(stack.getItem()).append(" x").append(stack.getCount());
+                    }
+                }
+            } else {
+                return "n/a";
+            }
+            return b.append(']').toString();
+        } catch (final Throwable t) {
+            return "<读失败:" + t.getClass().getSimpleName() + ">";
+        }
     }
 
     /** 记录一次挂接/解挂：用来判断服务端到底有没有把索引写进去。 */

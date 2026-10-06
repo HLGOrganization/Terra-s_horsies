@@ -1362,6 +1362,82 @@ cd bench
 调大它换来的是「装货到马被压慢」之间可见的延迟：40 tick = 2 秒，
 手快的玩家能明显感觉到。按上表的数据，**没有任何需要调它的理由**。
 
+### 14.14 两个必须写下来的上游事实（都靠字节码确认）
+
+14.12/14.13 的改动之后又冒出「负重太轻」「装货不更新」。
+根因都在上游的实现细节里，**光看方法名不可能猜到**，所以逐条记下。
+
+#### 事实一：`getCargo()` 是「渲染摘要」，数量被按 k 截断
+
+`TFCSupplyCartEntity` 实现了 `Container`，它的三个方法都指向**同一个真实货箱**：
+
+```
+getContainerSize()  ->  inventory.getSlots()
+getItem(i)          ->  inventory.getStackInSlot(i)
+setItem(i, stack)   ->  inventory.setStackInSlot(i, stack)
+initInventory()     ->  new TFCSupplyCartEntity$1(this, config.supplyCartInventorySize.getSize(), this)
+```
+
+界面（`SupplyCartContainer`）的构造里 `cartInv = AbstractDrawnInventoryEntity.inventory`，
+**直接引用同一个字段**。所以「界面写入 → 直读取回」这条链实时、无水份。
+
+但 `getCargo()` 读的是另一份东西：`CARGO` 这个 `EntityDataAccessor` 列表，
+由匿名处理器 `onContentsChanged(int)` 写入，算法是（字节码逐条）：
+
+```
+154: getSlots()                       // 车厢格数，例 54
+158: CARGO.size()                    // 摘要格数，例 9
+164: idiv                            // k = 54 / 9 = 6
+264: stack.copy()
+273: getCount()
+289: setCount(int)                    // 写成 count / k
+351: entityData.set(CARGO, array)    // 推给客户端渲染
+```
+
+**结论：`CARGO` 里的负重恒为真值的约 `1/k`。** 一辆 54 格车厢的摘要负重
+只有真实负重的六分之一上下。它只适合客户端画「车里大概有什么」，
+**永远不能参与重量计算**。
+
+曾经写成 `max(直读, 摘要)` 是错的：直读一旦返回 0 就会退到这份被截断的数据上，
+于是「太轻」。现在 `cargoWeightOf` **只用直读**；摘要仅用于诊断输出
+（`direct=` 与 `summary=` 并排打出来，两者相差约 k 倍属于正常现象）。
+
+#### 事实二：`shouldStopPulledTick()` 会绕过 `setPulling` 直接写字段
+
+全 jar 扫描 `putfield … Field pulling` 的结果：
+
+| 位置 | 行为 |
+|---|---|
+| `setPulling`（偏移 318 / 434） | 正常赋值，我们的 mixin 挂在这里 |
+| **`shouldStopPulledTick`（偏移 61）** | **直接 `this.pulling = null`，绕过 `setPulling`** |
+
+对应源码逻辑（停止分支）：
+
+```java
+if (this.pulling != null && this.pulling instanceof Player) {
+    setPulling(null);       // 玩家：走 setPulling，mixin 看得到
+} else {
+    this.pulling = null;    // ← 生物（马！）：直接写字段，mixin 看不到
+}
+return true;
+```
+
+所以只挂 `setPulling` 的「拉车者 → 马车」索引会和事实脱节：
+车已经不拉了，马的负重里还挂着它；反过来该挂的没挂上时，
+马的负重就只剩乘客份额——**这正是「太轻」与「装货不更新」的另一半成因**。
+
+**修法**：在 `attemptReattach()` 的 TAIL 再加一个锚点。
+它是 AstikorCarts 自己的方法名（不是原版方法，`remap = false` 在开发/生产两端同名），
+且由 `tick()` 每 tick 调用一次。在这里按 `getPulling()` 把索引重写一遍：
+
+- 索引与字段一致 → 直接返回，稳态零开销（一次取值 + 一次比较）；
+- 不一致 → 重建索引，并让**旧拉车者卸下、新拉车者加上**负重。
+
+索引因此可以短暂偏离事实，但**不会长期错误**。
+
+诊断里对应两个字段：`fieldPuller=`（上游字段说谁在拉）与
+`drift=`（索引与字段是否不一致），见 `LoadDebug.dumpHorse`。
+
 ---
 
 ## 15. TFC 金属马铠的外观

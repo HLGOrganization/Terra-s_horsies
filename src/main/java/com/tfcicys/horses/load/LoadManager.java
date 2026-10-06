@@ -162,33 +162,30 @@ public final class LoadManager {
     /**
      * 车厢内货物的 More Attributes 重量合计。
      *
-     * <p><b>多路来源取最大值</b>：任何一路读到内容，都不会被另一路读到 0 压掉。
-     * 三路来源是：
-     * <ol>
-     *   <li>{@code Container} 直读 —— 补给车实现了这个接口，服务端读到的就是
-     *       实体自己的 {@code ItemStackHandler}。玩家打开的界面写的也是同一个对象
-     *       （{@code SupplyCartContainer} 的构造直接引用
-     *       {@code AbstractDrawnInventoryEntity.inventory}），所以这条是实时的。</li>
-     *   <li>{@code ITEM_HANDLER} 能力 —— 没有实现 {@code Container} 的车走这条。</li>
-     *   <li>同步摘要 {@code getCargo()} —— 上游在货箱内容变化时刷新的
-     *       {@code EntityDataAccessor} 列表，客户端也拿得到。</li>
-     * </ol>
+     * <p><b>唯一权威来源是货箱本身</b>，也就是 {@code Container} 直读——补给车实现了
+     * 这个接口，服务端读到的就是实体自己的 {@code ItemStackHandler}。玩家打开的界面
+     * 写的也是同一个对象（{@code SupplyCartContainer} 的构造直接引用
+     * {@code AbstractDrawnInventoryEntity.inventory}），所以这条是实时的。
+     * 没有实现 {@code Container} 的车再退到 {@code ITEM_HANDLER} 能力。
      *
-     * <p>这里<b>刻意不保存任何跨 tick 的状态</b>。旧版本维护过一个
-     * 「最后一次成功读到的值」，读到 0 且摘要非空时就沿用它。那个兜底有两个后果：
-     * <ul>
-     *   <li>负重会<b>冻在上一次成功读取的那一刻</b>：往车里加东西，马的负重纹丝不动；
-     *       把车清空，反而立刻变得正确（因为空车走的是另一条分支）。</li>
-     *   <li>它是<b>整个模组共用一个静态值</b>，同时存在两辆以上马车时会互相串味。</li>
-     * </ul>
-     * 现在改为按来源取最大值：空车就是 0，装货就是当前值，不需要猜。
+     * <p><b>绝不能拿 {@code getCargo()} 算重量。</b>它是上游给渲染用的「摘要」：
+     * {@code TFCSupplyCartEntity$1.onContentsChanged} 里按
+     * {@code k = getSlots() / CARGO.size()} 把每格数量写成 {@code count / k}
+     * （字节码里就是一句 {@code idiv}）。也就是说摘要里的负重恒为真值的约 {@code 1/k}，
+     * 一辆 54 格车厢的摘要负重只有真实负重的几分之一。
+     * 曾经的 {@code max(直读, 摘要)} 写法正是「马匹负重太轻」的直接原因：
+     * 只要直读返回 0，就会退到这份被截断的数据上。
+     *
+     * <p>这里也<b>刻意不保存任何跨 tick 的状态</b>。旧版本维护过一个
+     * 「最后一次成功读到的值」，会把负重冻在上一次成功读取的那一刻，
+     * 而且全模组共用一个静态值、多辆车会互相串味。
+     * 现在：空车就是 0，装货就是当前值。
      */
     public static double cargoWeightOf(Entity cart) {
         final double direct = readCargoDirect(cart);
-        final double synced = syncedCargoWeight(cart);
-        final double result = Math.max(direct, synced);
-        LoadDebug.cargoRead(cart, direct, synced, result);
-        return result;
+        // 摘要只用于诊断：它和直读不一致，就说明读到的东西不对劲，值得在日志里留一笔。
+        LoadDebug.cargoRead(cart, direct, syncedSummaryWeightForDiagnosisOnly(cart));
+        return direct;
     }
 
     /** 直接从容器 / 能力读，两条都试，取较大的那个。 */
@@ -240,16 +237,16 @@ public final class LoadManager {
     }
 
     /**
-     * 同步摘要里的货物重量。
+     * 同步摘要的负重。<b>只用于诊断输出，绝不参与负重计算。</b>
      *
      * <p>走反射是因为 {@code TFCSupplyCartEntity} 属于可选依赖，不能出现在签名或
      * 常量池引用里，否则 AstikorCarts 缺席时会 {@code NoClassDefFoundError}。
      *
-     * <p>摘要的数量会被上游 {@code setCount(min(maxStackSize, count/k))} 截断，
-     * 所以它可能<b>低估</b>重量——因此只作为「直读为 0 时的补充来源」，
-     * 与直读取最大值，绝不会用它去覆盖一个更大的直读结果。
+     * <p>数值本身是被上游按 {@code count / k} 截断过的（见 {@link #cargoWeightOf}），
+     * 所以它比真值小一个数量级；把它和直读一起打出来，是为了让
+     * 「读到的是不是同一份数据」一眼可辨。
      */
-    private static double syncedCargoWeight(Entity cart) {
+    private static double syncedSummaryWeightForDiagnosisOnly(Entity cart) {
         try {
             final java.lang.reflect.Method getCargo = cart.getClass().getMethod("getCargo");
             final Object cargo = getCargo.invoke(cart);
@@ -263,7 +260,7 @@ public final class LoadManager {
                 return sum;
             }
         } catch (final Throwable ignored) {
-            // 不是补给车（没有 getCargo），或反射被拒：这一路就没有贡献。
+            // 不是补给车（没有 getCargo），或反射被拒：这一路就没有数值可报。
         }
         return 0.0D;
     }
