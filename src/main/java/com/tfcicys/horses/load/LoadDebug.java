@@ -39,6 +39,9 @@ public final class LoadDebug {
     /** 每辆车上次的货箱读取摘要，只在结果变化时打一行。 */
     private static final Map<UUID, String> LAST_CARGO = new ConcurrentHashMap<>();
 
+    /** 每辆车上次的货物审计摘要（不受开关控制，见 cargoAudit）。 */
+    private static final Map<UUID, String> LAST_AUDIT = new ConcurrentHashMap<>();
+
     /** 已经报告过「属性缺失」的实体类型，每种只报一次。 */
     private static final Set<String> MISSING_REPORTED = ConcurrentHashMap.newKeySet();
 
@@ -135,6 +138,51 @@ public final class LoadDebug {
     }
 
     /**
+     * 货物读数的<b>审计</b>记录：刻意<b>不受 {@code debugLoad} 开关控制</b>。
+     *
+     * <p>存在的理由：有些故障在日志里完全静默——读取既不抛异常、也不触发任何警告，
+     * 只是「读出来是空」。要定位这种问题，就必须留下货物读数的变化轨迹。
+     * 只在<b>某辆车的读数发生变化</b>时输出一行，所以一局游戏只会多出几条到几十条
+     * INFO，而不是刷屏。
+     *
+     * <p>行里同时给出：解出的车是谁、有没有货箱、格数、直读读数、摘要读数、
+     * 最终采用值，以及直读与摘要各自的逐格内容。据此足以区分：
+     * <ul>
+     *   <li>{@code inv=[...]} 有货 → 重量算法没问题；</li>
+     *   <li>{@code inv=[]} 全空而 {@code cargo=[...]} 有货 → 读到的不是装货的那份数据；</li>
+     *   <li>两者都空 → 这辆车当时确实没有货物（或负重挂到了别的车上）。</li>
+     * </ul>
+     */
+    public static void cargoAudit(Entity cart, double direct, double summary, double resolved) {
+        if (cart == null) {
+            return;
+        }
+        try {
+            final String line = describe(false, cart)
+                    + String.format(" container=%s slots=%d direct=%.0f summary=%.0f resolved=%.0f",
+                            cart instanceof net.minecraft.world.Container,
+                            cart instanceof net.minecraft.world.Container c ? c.getContainerSize() : -1,
+                            direct,
+                            summary,
+                            resolved)
+                    + " inv=" + slotContents(cart, false)
+                    + " cargo=" + slotContents(cart, true);
+            final UUID id = cart.getUUID();
+            if (line.equals(LAST_AUDIT.get(id))) {
+                return;
+            }
+            if (LAST_AUDIT.size() > 512) {
+                LAST_AUDIT.clear();
+            }
+            LAST_AUDIT.put(id, line);
+            LOGGER.info("[terras_horsies/audit] {}", line);
+        } catch (final Throwable t) {
+            // 审计不允许影响主流程。
+            LOGGER.warn("[terras_horsies/audit] 输出货物读数失败", t);
+        }
+    }
+
+    /**
      * 输出一次马车货箱的读取结果。
      *
      * <p>只在<b>这辆车的读数发生变化</b>时输出一行，所以开着诊断往车里搬货，
@@ -146,8 +194,8 @@ public final class LoadDebug {
      *   <li>{@code inv=[...]} 有货而 {@code direct=0} —— 重量算法没读到东西；</li>
      *   <li>{@code inv=[]} 全空而 {@code cargo=[...]} 有货 —— 索引指向了另一辆车
      *       （或读到的实体不是玩家在装货的那辆）；</li>
-     *   <li>{@code direct} 与 {@code summary} 相差约 {@code k} 倍 —— 正常现象，
-     *       摘要本就按 {@code count/k} 截断，这也是它不能参与算重量的原因。</li>
+     *   <li>{@code direct} 与 {@code summary} 的差距 —— 摘要与真值没有可靠换算关系，
+     *       这也是它不能参与算重量的原因。</li>
      * </ul>
      */
     public static void cargoRead(Entity cart, double direct, double summary) {

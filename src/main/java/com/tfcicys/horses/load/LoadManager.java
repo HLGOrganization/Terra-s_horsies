@@ -255,7 +255,9 @@ public final class LoadManager {
     public static double cargoWeightOf(Entity cart) {
         final double direct = readCargoDirect(cart);
         if (direct > 0.0D) {
-            LoadDebug.cargoRead(cart, direct, syncedSummaryWeightForDiagnosisOnly(cart));
+            final double summary = syncedSummaryWeightForDiagnosisOnly(cart);
+            LoadDebug.cargoRead(cart, direct, summary);
+            LoadDebug.cargoAudit(cart, direct, summary, direct);
             return direct;
         }
 
@@ -265,28 +267,31 @@ public final class LoadManager {
         // 里 tag.put("Items", inventory.serializeNBT())），这份数据和货箱一一对应，
         // 而且不经过 getContainerSize / ITEM_HANDLER 能力这两条可能出问题的路。
         final double summary = syncedSummaryWeightForDiagnosisOnly(cart);
+        double resolved = 0.0D;
         // 只在服务端兜底：客户端读到 0 是正常的（货箱不同步），
         // 而摘要会同步过去，走兜底只会白跑一遍序列化并误报警告。
         if (summary > 0.0D && !cart.level().isClientSide()) {
             final double fromNbt = cargoWeightFromSavedNbt(cart);
             if (fromNbt > 0.0D) {
                 reportReadFailure(cart, summary, fromNbt);
-                LoadDebug.cargoRead(cart, fromNbt, summary);
-                return fromNbt;
+                resolved = fromNbt;
             }
         }
 
         // 兜底也没货：如果这辆车压根没有货箱（不是 Container，或格数为 0），
         // 那多半是索引指向的车不对——最典型的是马直接拉着一辆「牵引车」，
         // 真正的货箱挂在它拖着的那一节上。每辆车只报一次，不会刷屏。
-        if (!cart.level().isClientSide() && containerSlotsOf(cart) <= 0 && noContainerReported.putIfAbsent(cart.getUUID(), Boolean.TRUE) == null) {
+        if (resolved == 0.0D && !cart.level().isClientSide()
+                && containerSlotsOf(cart) <= 0
+                && noContainerReported.putIfAbsent(cart.getUUID(), Boolean.TRUE) == null) {
             LOGGER.warn("[terras_horsies] 为拉车者解出的马车 {}#{} 没有货箱（Container={}）。"
                             + "若你实际装货的是另一节车（例如中间有牵引车），请把这一行连同马车编组一起反馈——"
                             + "这代表负重挂到了错误的车上。",
                     cart.getType(), cart.getId(), containerSlotsOf(cart) >= 0);
         }
         LoadDebug.cargoRead(cart, direct, summary);
-        return direct;
+        LoadDebug.cargoAudit(cart, direct, summary, resolved);
+        return resolved;
     }
 
     /**
