@@ -1169,6 +1169,7 @@ maxLoadAttr.setBaseValue(LevelUtils.getLevel(player, "endurance") * 100.0 + 300)
     cartCargoFactor = 0.6         # 货物系数（减轻 40%）
     draftCartFactor = 0.4         # 挽马拉车系数
     cartRefreshIntervalTicks = 5  # 拉车生物重新读车厢货物的间隔（tick），1~40
+    cartIgnoresItemSize = true    # 解除车厢的物品尺寸上限（false 复原上游限制）
 [rider]
     riderLoad = 350               # 骑手自身体重
     draftRiderLoad = 250          # 挽马的骑手自身体重
@@ -1362,7 +1363,61 @@ cd bench
 调大它换来的是「装货到马被压慢」之间可见的延迟：40 tick = 2 秒，
 手快的玩家能明显感觉到。按上表的数据，**没有任何需要调它的理由**。
 
-### 14.14 两个必须写下来的上游事实（都靠字节码确认）
+### 14.14 坐骑自带容器与车厢尺寸上限（两个新需求）
+
+#### 一、驴／骡箱子里的货物也算负重
+
+TFC 的驴和骡可以用箱子右键装上箱子（箱子本身是个物品，走
+`TFCChestedHorse.getChestItem()/setChestItem()`），箱子里的东西理应与骑手、马车一样
+压在身上。实现落在 {@code LoadManager.carriedLoadOf}：
+
+```
+loadOf = carriedLoadOf(自己带着的) + passengerLoadOf(乘客) + cartLoadFor(拉着的车)
+```
+
+**读法用纯原版 {@code Entity.getSlot(int)}，不引用 TFC 的任何类型**：
+
+- TFC 的 {@code TFCDonkey}/{@code TFCMule} 继承 {@code TFCChestedHorse}，
+  后者继承原版 {@code AbstractChestedHorse}；箱子格正是通过
+  {@code m_141942_}（{@code getSlot}）暴露的（TFC 在那里返回自己的 {@code SlotAccess}）。
+- 越界时上游返回 {@code SlotAccess.NULL}，遇到就停 —— **因此不需要知道箱子有几格**，
+  原版驴 5 格、骡 5 格、羊驼 3~15 格都能自适应（上限 {@code MAX_CARRIED_SLOTS = 32} 只是安全值）。
+- **玩家不走这条**：玩家背包由 More Attributes 按 {@code equip_load_current} 自己算，
+  这里再算一遍就是同一批物品罚两次。
+
+#### 二、解除车厢的物品尺寸上限
+
+TFCAstikorCarts 拒绝放入大于配置 {@code maxItemSize} 的物品。
+逐条读字节码后可以确认**判据只有一个静态方法**：
+
+```java
+// TFCSupplyCartEntity.isValid(ItemStack) —— 静态
+ItemSizeManager.get(stack).getSize()
+        .isEqualOrSmallerThan(TFCAstikorCartsConfig.COMMON.maxItemSize.get());
+```
+
+它的三个入口全在这里：
+
+| 入口 | 位置 |
+|---|---|
+| GUI 槽位（TFC 版） | {@code SupplyCartContainer$RestrictedSlotItemHandler.mayPlace} |
+| GUI 槽位（基类版） | {@code CartContainer$RestrictedSlot.mayPlace} |
+| 自动化（漏斗/管道） | {@code TFCSupplyCartEntity.isItemValid(int, ItemStack)} |
+
+所以在 `SupplyCartOverburdenMixin` 里对这一处 `@Inject(at = HEAD)` 直接放行即可全局生效
+（`isValid` 是上游自己的方法名，不是原版方法，所以 `remap = false` + 字面名）。
+
+> 目标是 {@code static} 方法，**处理器也必须是 {@code static}**，否则 Mixin 会在应用阶段报错。
+> 这一条已加进 {@code tools/check_mixin_injectors.py} 的核对范围之外（它指向上游自有方法，
+> checker 对其只做 SKIP），所以额外用字节码确认了签名唯一且为 public static。
+
+为什么可以去掉：尺寸限制原本是给「装不下」一个上限，
+而现在负重已经由 More Attributes 的完整重量体系接管（装了就会被压慢、压趴），
+再叠一层尺寸限制属于重复约束。开关是 {@code load.cart.cartIgnoresItemSize}（默认 true）。
+
+---
+
+### 14.15 四个必须写下来的上游事实（都靠字节码确认）
 
 14.12/14.13 的改动之后又冒出「负重太轻」「装货不更新」。
 根因都在上游的实现细节里，**光看方法名不可能猜到**，所以逐条记下。

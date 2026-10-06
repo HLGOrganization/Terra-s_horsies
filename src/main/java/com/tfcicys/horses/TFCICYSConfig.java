@@ -111,6 +111,20 @@ public final class TFCICYSConfig {
     }
 
     /**
+     * 车厢是否忽略物品尺寸上限。
+     *
+     * <p>mixin 在运行时被调用，那时配置早已加载，{@code catch} 只是防御性的。
+     * 读取失败时回退出厂值 {@code true}（即解除限制），与默认值一致。
+     */
+    public static boolean cartIgnoresItemSize() {
+        try {
+            return COMMON.cartIgnoresItemSize.get();
+        } catch (final IllegalStateException notLoadedYet) {
+            return true;
+        }
+    }
+
+    /**
      * 是否把 Icy 马匹当中立生物。
      *
      * <p>mixin 是在运行时被调用的，配置那时早已加载，{@code catch} 只是防御性的。
@@ -640,6 +654,7 @@ public final class TFCICYSConfig {
         public final ForgeConfigSpec.DoubleValue cartCargoFactor;
         public final ForgeConfigSpec.DoubleValue draftCartFactor;
         public final ForgeConfigSpec.IntValue cartRefreshIntervalTicks;
+        public final ForgeConfigSpec.BooleanValue cartIgnoresItemSize;
 
         // ── 骑乘 ────────────────────────────────────────────────────
         public final ForgeConfigSpec.IntValue riderLoad;
@@ -753,6 +768,13 @@ public final class TFCICYSConfig {
                             "often stay around 0.1-1% of a single 50ms server tick, so raising this value is",
                             "only worth it if you want to shave off that last fraction of a percent.")
                     .defineInRange("cartRefreshIntervalTicks", 5, 1, 40);
+
+            cartIgnoresItemSize = b
+                    .comment("Ignore the cart's item size limit. TFCAstikorCarts rejects items larger than",
+                            "maxItemSize, which is redundant now that carry weight governs what a cart can hold.",
+                            "true (default) = any item may be loaded; the puller is simply crushed by the weight.",
+                            "false = restore the upstream size rule.")
+                    .define("cartIgnoresItemSize", true);
 
             b.pop();
 

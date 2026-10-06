@@ -17,6 +17,7 @@ import net.minecraft.nbt.ListTag;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.SlotAccess;
 import net.minecraft.world.entity.ai.attributes.Attribute;
 import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
@@ -57,6 +58,15 @@ public final class LoadManager {
 
     /** 沿 {@code drawn} 链最多走几节，防环。 */
     private static final int MAX_TRAIN_LENGTH = 8;
+
+    /**
+     * 读坐骑「自己带着的东西」时最多探几格。
+     *
+     * <p>用 {@code Entity.getSlot(i)} 逐格试探、遇到 {@code SlotAccess.NULL} 停，
+     * 所以这个数只是个安全上限（原版驴 5 格、骡 5 格、羊驼 3~15 格、
+     * TFC 有箱子马按配置最多十几格）。
+     */
+    private static final int MAX_CARRIED_SLOTS = 32;
 
     /** 每辆车最近一次可信的货物重量：{重量, 记录时的 gameTime}。 */
     private static final Map<UUID, double[]> CARGO_MEMORY = new ConcurrentHashMap<>();
@@ -134,13 +144,44 @@ public final class LoadManager {
     // ══════════════════════════════════════════════════════════════
 
     /**
-     * 生物此刻承受的总负重 = 全部乘客的自身体重与随身负重 + 它拉着的马车。
+     * 生物此刻承受的总负重 = 自己带着的东西 + 全部乘客的自身体重与随身负重 + 它拉着的马车。
      */
     public static int loadOf(LivingEntity entity) {
         double total = 0.0D;
+        total += carriedLoadOf(entity);
         total += passengerLoadOf(entity);
         total += cartLoadFor(entity);
         return Math.max(0, (int) Math.round(total));
+    }
+
+    /**
+     * 坐骑**自己带着**的东西的重量。
+     *
+     * <p>用户需求：TFC 的驴和骡可以用箱子右键装上箱子装东西，
+     * 箱子里的货物也应该压在它们身上。
+     *
+     * <p>读法用原版 {@code Entity.getSlot(int)}，**不引用 TFC 的任何类型**：
+     * TFC 的 {@code TFCChestedHorse} 继承原版 {@code AbstractChestedHorse}，
+     * 箱子内容正是通过 {@code m_141942_}（{@code getSlot}）暴露出来的
+     * （它内部返回一个 {@code SlotAccess}）。越界的槽位上游返回
+     * {@code SlotAccess.NULL}，遇到就停——这样不需要知道箱子有几格。
+     *
+     * <p>玩家不走这条：玩家背包由 More Attributes 自己按 {@code equip_load_current} 算，
+     * 这里再算一遍就是同一批物品罚两次。
+     */
+    private static double carriedLoadOf(LivingEntity entity) {
+        if (entity instanceof Player) {
+            return 0.0D;
+        }
+        double sum = 0.0D;
+        for (int slot = 0; slot < MAX_CARRIED_SLOTS; slot++) {
+            final SlotAccess access = entity.getSlot(slot);
+            if (access == null || access == SlotAccess.NULL) {
+                break;
+            }
+            sum += MoreAttributesApi.itemWeight(access.get());
+        }
+        return sum;
     }
 
     /**
