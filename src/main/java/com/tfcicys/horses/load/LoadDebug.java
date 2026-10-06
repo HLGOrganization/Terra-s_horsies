@@ -141,22 +141,26 @@ public final class LoadDebug {
     }
 
     /**
-     * 记录一次「同一个实体 id 上出现两个车辆对象」。
+     * 记录一次「同一个实体 id 上出现两个车辆对象」以及判定过程。
      *
-     * <p>这是对上游按 id 记账（{@code AstikorWorld} 的 {@code Int2ObjectMap} +
-     * {@code level.getEntity(id)}）的直接取证：{@code uuid}/{@code inst} 不同而
-     * {@code cartId} 相同，就确认了这个成因。只在真正发生替换时输出一次。
+     * <p>{@code uuid}/{@code inst} 不同而 {@code cartId} 相同，就确认了上游按 id 记账
+     * 造成的状态分叉；{@code sigA}/{@code sigB} 是两者渲染摘要的指纹，
+     * {@code live=/} 是当前认定「玩家正在编辑的那辆」，{@code inLevel=} 说明该对象
+     * 是否能被 {@code level.getEntities().get(uuid)} 找到。
      */
-    public static void cargoCandidate(Entity adopted, Entity rejected) {
-        if (adopted == null || rejected == null) {
+    public static void cartDuplicate(Entity a, Entity b, int sigA, int sigB, Integer liveInst) {
+        if (a == null) {
             return;
         }
         try {
             final String line = String.format(
-                    "cartId=%d 采用世界里的对象(uuid=%s inst=%08x)，丢弃索引里的副本(uuid=%s inst=%08x)",
-                    adopted.getId(), adopted.getUUID(), System.identityHashCode(adopted),
-                    rejected.getUUID(), System.identityHashCode(rejected));
-            final UUID id = adopted.getUUID();
+                    "cartId=%d A(uuid=%s inst=%08x sig=%d inLevel=%s) B(%s) live=%s",
+                    a.getId(), a.getUUID(), System.identityHashCode(a), sigA,
+                    inWorld(a),
+                    b == null ? "无" : String.format("uuid=%s inst=%08x sig=%d inLevel=%s",
+                            b.getUUID(), System.identityHashCode(b), sigB, inWorld(b)),
+                    liveInst == null ? "未定" : String.format("%08x", liveInst));
+            final UUID id = a.getUUID();
             if (line.equals(LAST_CANDIDATE.get(id))) {
                 return;
             }
@@ -168,6 +172,12 @@ public final class LoadDebug {
         } catch (final Throwable t) {
             LOGGER.warn("[terras_horsies/audit] 输出车辆对象重复信息失败", t);
         }
+    }
+
+    /** 这个世界里按 UUID 找到的是不是它本人。 */
+    private static boolean inWorld(Entity cart) {
+        return cart.level() instanceof net.minecraft.server.level.ServerLevel server
+                && server.getEntity(cart.getUUID()) == cart;
     }
 
     /**

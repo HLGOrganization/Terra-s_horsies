@@ -79,6 +79,11 @@ public final class LoadManager {
     private static final Map<Class<?>, java.lang.reflect.Field> DRAWN_FIELDS = new ConcurrentHashMap<>();
     private static final java.util.Set<Class<?>> NO_DRAWN_FIELD = ConcurrentHashMap.newKeySet();
 
+    /** 每辆车每个对象（按 inst 区分）上次见到的摘要指纹，用来识别「玩家正在编辑的那辆」。 */
+    private static final Map<UUID, Map<Integer, Integer>> CARGO_SUMMARY_SIG = new ConcurrentHashMap<>();
+    /** 最近一次摘要发生变化的对象（inst）。 */
+    private static final Map<UUID, Integer> CARGO_LIVE_INST = new ConcurrentHashMap<>();
+
     /** 马匹负重上限的修饰符。 */
     private static final UUID ANIMAL_SPEED_UUID = UUID.fromString("3c1a7e90-5b24-4d18-9f60-2ab7c0d4e815");
     private static final UUID ANIMAL_JUMP_UUID = UUID.fromString("7d2b4f61-8a35-4c92-b1e7-50f3a9c6d208");
@@ -183,20 +188,10 @@ public final class LoadManager {
         if (head == null) {
             return 0.0D;
         }
-        // 同一个实体 id 上可能同时存在两个车辆对象。上游是按**实体 id** 记账的
-        // （AstikorWorld 里就是 Int2ObjectMap<AbstractDrawnEntity>，attemptReattach
-        // 也用 level.getEntity(id) 找回拉车者），所以「世界里的那辆」与
-        // 「索引里那份副本」可以并存，并且轮流覆盖我们这张表。
-        // 实测现象：同一个 id、相隔 25 ms，一次读到 12560、一次读到 0。
-        //
-        // 判定办法：**无条件以世界里的那辆为准**——玩家右键打开界面写进去的是它，
-        // 车上渲染出货物的也是它。副本只可能是一份过期的空壳。
-        // （刻意不写成「取货物更大的那个」：那会让「清空后仍读到旧值」的毛病回来。）
-        final Entity inWorld = head.level().getEntity(head.getId());
-        if (inWorld != null && inWorld != head) {
-            LoadDebug.cargoCandidate(inWorld, head);
-            head = inWorld;
-        }
+        // 同一个实体 id 上可能同时存在两个车辆对象（世界里的那辆 + AstikorWorld 里那份
+        // 过期副本），两者的内容会分叉，并且轮流写进我们的索引表——实测同一 id、
+        // 相隔 25 ms 一次读到 12560、一次读到 0。判定「哪个是玩家正在编辑的」见 pickLiveCart。
+        head = pickLiveCart(head);
         final double bestCargo = cargoWeightOf(head);
 
         final TFCICYSConfig.Common c = TFCICYSConfig.COMMON;
@@ -390,6 +385,88 @@ public final class LoadManager {
             CARGO_MEMORY_BY_ID.remove(cart.getId());
             CARGO_ID_TYPE.remove(cart.getId());
         }
+    }
+
+    /**
+     * 从同一辆车的两个对象里挑出「玩家正在编辑的那一辆」。
+     *
+     * <p>为什么会有两个对象：上游按**实体 id** 记账（{@code AstikorWorld} 内部是
+     * {@code Int2ObjectMap<AbstractDrawnEntity>}，{@code attemptReattach} 也用
+     * {@code level.getEntity(id)} 找拉车者），于是世界里那辆与它的一份过期副本可以并存，
+     * 并轮流覆盖我们的索引表。两者的货箱内容会分叉：一个装着 785 根原木、另一个是空壳。
+     *
+     * <p>判定依据是**谁的渲染摘要最近变化过**。摘要由上游在货箱内容变化时整体重建，
+     * 所以玩家往哪辆车里装货，哪辆车的摘要就会变：
+     * <ul>
+     *   <li>装货 → 它变化 ⇒ 选中它 ⇒ 负重立刻正确；</li>
+     *   <li>卸空 → <b>它的摘要同样变化</b>（变成全空）⇒ 仍然选中它 ⇒ 负重立刻归零。</li>
+     * </ul>
+     * 这就是它不会像「取货物更大的那个」那样冻在旧值上的原因——按**来源**判定，不按**大小**。
+     *
+     * <p>还没有历史可依据时（玩家还没动过货），退回「直读有货的那辆」：
+     * 空副本没有理由优先。
+     */
+    private static Entity pickLiveCart(Entity registryCart) {
+        final Entity byUuid = inWorldByUuid(registryCart);
+        final Entity other = byUuid != null && byUuid != registryCart ? byUuid : null;
+        final int sigRegistry = observeSummary(registryCart);
+        final int sigOther = other == null ? 0 : observeSummary(other);
+        final UUID id = registryCart.getUUID();
+        final Integer liveInst = CARGO_LIVE_INST.get(id);
+        LoadDebug.cartDuplicate(registryCart, other, sigRegistry, sigOther, liveInst);
+        if (other == null) {
+            return registryCart;
+        }
+        if (liveInst != null) {
+            if (liveInst == System.identityHashCode(registryCart)) {
+                return registryCart;
+            }
+            if (liveInst == System.identityHashCode(other)) {
+                return other;
+            }
+        }
+        // 没有历史：选直读有货的那个。
+        return readCargoDirect(other) > readCargoDirect(registryCart) ? other : registryCart;
+    }
+
+    /**
+     * 记录一辆车当前的摘要指纹；与上次不同就说明玩家刚编辑过它，
+     * 于是把它记为「活着的那辆」。
+     */
+    private static int observeSummary(Entity cart) {
+        final int signature = summarySignature(cart);
+        final Integer inst = System.identityHashCode(cart);
+        final Map<Integer, Integer> seen =
+                CARGO_SUMMARY_SIG.computeIfAbsent(cart.getUUID(), key -> new ConcurrentHashMap<>());
+        final Integer previous = seen.put(inst, signature);
+        if (previous != null && previous != signature) {
+            CARGO_LIVE_INST.put(cart.getUUID(), inst);
+        }
+        if (CARGO_SUMMARY_SIG.size() > 256) {
+            CARGO_SUMMARY_SIG.clear();
+            CARGO_LIVE_INST.clear();
+        }
+        return signature;
+    }
+
+    /** 渲染摘要的指纹（按格取物品与数量求和）。摘要与真值没有可靠换算关系，只用来当指纹。 */
+    private static int summarySignature(Entity cart) {
+        return Float.floatToIntBits((float) syncedSummaryWeightForDiagnosisOnly(cart));
+    }
+
+    /**
+     * 按 UUID 找回「世界里的那一个」对象；没有别的对象就返回 null。
+     *
+     * <p>用 {@code ServerLevel.getEntity(UUID)}：1.20.1 的 {@code Level} 没有无参
+     * {@code getEntities()}（那是 1.21+ 的 API），而 {@code getEntity(int)} 在实测里
+     * 拿不到这两份对象中的任何一个（多半是 null）。按 UUID 查是这条链路上唯一可靠的入口。
+     */
+    private static Entity inWorldByUuid(Entity cart) {
+        if (cart.level() instanceof net.minecraft.server.level.ServerLevel server) {
+            final Entity found = server.getEntity(cart.getUUID());
+            return found == cart ? null : found;
+        }
+        return null;
     }
 
     /**
