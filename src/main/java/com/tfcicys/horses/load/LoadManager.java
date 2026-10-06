@@ -1,6 +1,8 @@
 package com.tfcicys.horses.load;
 
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.slf4j.Logger;
@@ -10,6 +12,8 @@ import com.tfcicys.horses.TFCICYSConfig;
 import com.tfcicys.horses.TfcIcysHorses;
 
 import net.dries007.tfc.common.entities.livestock.TFCAnimalProperties;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
@@ -43,6 +47,10 @@ public final class LoadManager {
     /** 货箱读取失败每种只报告一次：拉车中的实体是每 5 tick 读一次的，不能刷屏。 */
     private static final AtomicBoolean CONTAINER_FAILURE_LOGGED = new AtomicBoolean(false);
     private static final AtomicBoolean HANDLER_FAILURE_LOGGED = new AtomicBoolean(false);
+    private static final AtomicBoolean NBT_FALLBACK_FAILURE_LOGGED = new AtomicBoolean(false);
+
+    /** 每辆车上次报告「直读不出内容」的时刻，按车 60 秒限流。 */
+    private static final Map<UUID, Long> lastReadFailureReport = new ConcurrentHashMap<>();
 
     /** 马匹负重上限的修饰符。 */
     private static final UUID ANIMAL_SPEED_UUID = UUID.fromString("3c1a7e90-5b24-4d18-9f60-2ab7c0d4e815");
@@ -162,30 +170,107 @@ public final class LoadManager {
     /**
      * 车厢内货物的 More Attributes 重量合计。
      *
-     * <p><b>唯一权威来源是货箱本身</b>，也就是 {@code Container} 直读——补给车实现了
-     * 这个接口，服务端读到的就是实体自己的 {@code ItemStackHandler}。玩家打开的界面
-     * 写的也是同一个对象（{@code SupplyCartContainer} 的构造直接引用
-     * {@code AbstractDrawnInventoryEntity.inventory}），所以这条是实时的。
-     * 没有实现 {@code Container} 的车再退到 {@code ITEM_HANDLER} 能力。
+     * <p>取值顺序：
+     * <ol>
+     *   <li><b>直读货箱</b>（主路径）。补给车实现了 {@code Container}，服务端读到的就是
+     *       实体自己的 {@code ItemStackHandler}；玩家打开的界面写的也是同一个对象
+     *       （{@code SupplyCartContainer} 的构造直接引用
+     *       {@code AbstractDrawnInventoryEntity.inventory}），所以这条实时、无水份。
+     *       没有实现 {@code Container} 的车再退到 {@code ITEM_HANDLER} 能力。</li>
+     *   <li><b>存档 NBT 兜底</b>。直读为 0、而渲染摘要却报告车厢里有东西时，
+     *       说明是读取路径失效而不是车空了，于是改读实体存档的 {@code "Items"}
+     *       （上游把货箱原样写在那里），并打一条不需要开关的警告。</li>
+     * </ol>
      *
-     * <p><b>绝不能拿 {@code getCargo()} 算重量。</b>它是上游给渲染用的「摘要」：
-     * {@code TFCSupplyCartEntity$1.onContentsChanged} 里按
-     * {@code k = getSlots() / CARGO.size()} 把每格数量写成 {@code count / k}
-     * （字节码里就是一句 {@code idiv}）。也就是说摘要里的负重恒为真值的约 {@code 1/k}，
-     * 一辆 54 格车厢的摘要负重只有真实负重的几分之一。
-     * 曾经的 {@code max(直读, 摘要)} 写法正是「马匹负重太轻」的直接原因：
-     * 只要直读返回 0，就会退到这份被截断的数据上。
+     * <p><b>绝不能拿 {@code getCargo()} 算重量</b>，即使用来兜底也不行。它是上游给渲染用的
+     * 「摘要」：{@code onContentsChanged} 先按物品聚合总数，按数量降序、方块物品靠后排序，
+     * 只保留前 {@code CARGO.size()} 种，再把每种铺成
+     * {@code Math.max(1, (count + k/2) / k)} 格（{@code k = getSlots() / CARGO.size()}），
+     * 第 i 格写 {@code min(原有堆叠, count / i)}。也就是说它<b>既可能偏大也可能偏小、
+     * 还会整类丢弃物品</b>，没有任何可靠的换算关系。它只用于诊断输出。
      *
      * <p>这里也<b>刻意不保存任何跨 tick 的状态</b>。旧版本维护过一个
      * 「最后一次成功读到的值」，会把负重冻在上一次成功读取的那一刻，
      * 而且全模组共用一个静态值、多辆车会互相串味。
-     * 现在：空车就是 0，装货就是当前值。
      */
     public static double cargoWeightOf(Entity cart) {
         final double direct = readCargoDirect(cart);
-        // 摘要只用于诊断：它和直读不一致，就说明读到的东西不对劲，值得在日志里留一笔。
-        LoadDebug.cargoRead(cart, direct, syncedSummaryWeightForDiagnosisOnly(cart));
+        if (direct > 0.0D) {
+            LoadDebug.cargoRead(cart, direct, syncedSummaryWeightForDiagnosisOnly(cart));
+            return direct;
+        }
+
+        // 直读为 0。两种可能必须分开：车真的空了，或这条路在你的环境里读不出东西。
+        // 摘要（getCargo）有货就说明货箱里确实有东西，于是走无损兜底：实体存档 NBT。
+        // 上游把货箱写在 "Items" 键下（AbstractDrawnInventoryEntity#addAdditionalSaveData
+        // 里 tag.put("Items", inventory.serializeNBT())），这份数据和货箱一一对应，
+        // 而且不经过 getContainerSize / ITEM_HANDLER 能力这两条可能出问题的路。
+        final double summary = syncedSummaryWeightForDiagnosisOnly(cart);
+        // 只在服务端兜底：客户端读到 0 是正常的（货箱不同步），
+        // 而摘要会同步过去，走兜底只会白跑一遍序列化并误报警告。
+        if (summary > 0.0D && !cart.level().isClientSide()) {
+            final double fromNbt = cargoWeightFromSavedNbt(cart);
+            if (fromNbt > 0.0D) {
+                reportReadFailure(cart, summary, fromNbt);
+                LoadDebug.cargoRead(cart, fromNbt, summary);
+                return fromNbt;
+            }
+        }
+        LoadDebug.cargoRead(cart, direct, summary);
         return direct;
+    }
+
+    /**
+     * 从实体存档 NBT 的 {@code "Items"} 里取货物重量。
+     *
+     * <p>这是<b>兜底</b>路径，正常情况下永远不会执行：只有在直读返回 0、
+     * 而渲染摘要却报告车厢里有东西（说明是读取出了问题，不是车空了）时才走。
+     * {@code saveWithoutId} 会走一遍 {@code addAdditionalSaveData}，有分配开销，
+     * 所以不能放在主路径上。
+     *
+     * <p>解析用纯原版 API（{@code ItemStack.of}），不引用 AstikorCarts 的任何类型，
+     * 这样可选依赖缺席时也不会有类加载问题。
+     */
+    private static double cargoWeightFromSavedNbt(Entity cart) {
+        try {
+            final CompoundTag saved = cart.saveWithoutId(new CompoundTag());
+            final ListTag items = saved.getList("Items", 10); // 10 = CompoundTag
+            double sum = 0.0D;
+            for (int i = 0; i < items.size(); i++) {
+                final ItemStack stack = ItemStack.of(items.getCompound(i));
+                if (!stack.isEmpty()) {
+                    sum += MoreAttributesApi.itemWeight(stack);
+                }
+            }
+            return sum;
+        } catch (final Throwable t) {
+            if (NBT_FALLBACK_FAILURE_LOGGED.compareAndSet(false, true)) {
+                LOGGER.warn("[terras_horsies] 从存档 NBT 读取马车 {} 货物失败，后续同类失败不再重复报告", cart, t);
+            }
+            return 0.0D;
+        }
+    }
+
+    /**
+     * 报告一次「货箱直读不出内容」。
+     *
+     * <p><b>这条日志不需要打开任何诊断开关</b>：它代表一个真实的异常状态
+     * （渲染摘要说有货、直读却说没有），正是「马匹负重太轻／装货不生效」的现场证据，
+     * 所以按车、每 60 秒最多报一次，避免刷屏但绝不静默。
+     */
+    private static void reportReadFailure(Entity cart, double summary, double fromNbt) {
+        final long now = cart.level().getGameTime();
+        final Long previous = lastReadFailureReport.get(cart.getUUID());
+        if (previous != null && now - previous < 1200L) {
+            return;
+        }
+        if (lastReadFailureReport.size() > 256) {
+            lastReadFailureReport.clear();
+        }
+        lastReadFailureReport.put(cart.getUUID(), now);
+        LOGGER.warn("[terras_horsies] 马车 {}#{} 的货箱直读返回 0，但渲染摘要报告有货——已改用存档 NBT 兜底（重量约 {}，摘要读数 {}）。"
+                        + "这通常意味着货箱读取路径在该环境下失效，请把这条日志连同上下文一起反馈。",
+                cart.getType(), cart.getId(), (long) fromNbt, (long) summary);
     }
 
     /** 直接从容器 / 能力读，两条都试，取较大的那个。 */

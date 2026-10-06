@@ -1367,7 +1367,7 @@ cd bench
 14.12/14.13 的改动之后又冒出「负重太轻」「装货不更新」。
 根因都在上游的实现细节里，**光看方法名不可能猜到**，所以逐条记下。
 
-#### 事实一：`getCargo()` 是「渲染摘要」，数量被按 k 截断
+#### 事实一：`getCargo()` 是「渲染摘要」，与真值没有可靠换算关系
 
 `TFCSupplyCartEntity` 实现了 `Container`，它的三个方法都指向**同一个真实货箱**：
 
@@ -1379,28 +1379,61 @@ initInventory()     ->  new TFCSupplyCartEntity$1(this, config.supplyCartInvento
 ```
 
 界面（`SupplyCartContainer`）的构造里 `cartInv = AbstractDrawnInventoryEntity.inventory`，
-**直接引用同一个字段**。所以「界面写入 → 直读取回」这条链实时、无水份。
+**直接引用同一个字段**。货箱本身由 `"Items"` 键存读档
+（`AbstractDrawnInventoryEntity#addAdditionalSaveData` 里
+`tag.put("Items", inventory.serializeNBT())`，读档同理），
+且 `inventory` 在构造函数里当场赋值，不会为 null。
 
 但 `getCargo()` 读的是另一份东西：`CARGO` 这个 `EntityDataAccessor` 列表，
-由匿名处理器 `onContentsChanged(int)` 写入，算法是（字节码逐条）：
+由匿名处理器 `onContentsChanged(int)` 写入。**逐条读字节码**，它做的是：
+
+```java
+// 1. 按物品聚合总数（Object2IntLinkedOpenHashMap<Item, 总数>）
+//    同时留下每种物品的一个模板堆叠
+// 2. 排序：先按总数降序，方块物品（BlockItem）排后面
+// 3. limit(CARGO.size())  ← 只保留前 N 种，其余整类丢弃
+// 4. k = getSlots() / CARGO.size()                       // 例 54 / 9 = 6
+// 5. 对保留的每种：
+//        per = Math.max(1, (count + k / 2) / k)          // 四舍五入的 count/k，至少 1 格
+//        for (i = 1; i <= per && slot < CARGO.size(); i++) {
+//            copy = 模板.copy();
+//            copy.setCount(Math.min(copy.getCount(), count / i));   // 第 i 格写 count / i
+//        }
+```
 
 ```
-154: getSlots()                       // 车厢格数，例 54
-158: CARGO.size()                    // 摘要格数，例 9
-164: idiv                            // k = 54 / 9 = 6
-264: stack.copy()
-273: getCount()
-289: setCount(int)                    // 写成 count / k
-351: entityData.set(CARGO, array)    // 推给客户端渲染
+154: getSlots()  158: CARGO.size()  164: idiv          // k
+203: iconst_1  206: getIntValue  211: iload k  213: iconst_2  214: idiv  215: iadd
+216: iload k   218: idiv   219: Math.max(II)I          // per = max(1, (count + k/2)/k)
+269..289: copy → getCount → min(?, count / i) → setCount
+314..351: entityData.set(CARGO, slots)                // 推给客户端渲染
 ```
 
-**结论：`CARGO` 里的负重恒为真值的约 `1/k`。** 一辆 54 格车厢的摘要负重
-只有真实负重的六分之一上下。它只适合客户端画「车里大概有什么」，
-**永远不能参与重量计算**。
+**结论：这份摘要既可能偏大也可能偏小，还会整类丢物品。**
+同一种物品的 64 个在 k=6 时会铺成 `64, 32, 21, 16, 12, 10, 9, 8, 7` 九格（合计 179，是真实值的 2.8 倍）；
+而物品类型多于 `CARGO.size()` 时，排在后面的种类**全部消失**。
+**它只适合客户端画「车里大概有什么」，永远不能参与重量计算。**
 
-曾经写成 `max(直读, 摘要)` 是错的：直读一旦返回 0 就会退到这份被截断的数据上，
-于是「太轻」。现在 `cargoWeightOf` **只用直读**；摘要仅用于诊断输出
-（`direct=` 与 `summary=` 并排打出来，两者相差约 k 倍属于正常现象）。
+曾经的 `max(直读, 摘要)` 是错的：直读一旦返回 0 就会退到这份数据上，
+算出来的负重既不对、方向还不确定（实测反馈是「太轻」）。
+现在摘要只用于诊断输出（`direct=` 与 `summary=` 并排打出来）。
+
+#### 事实一补充：直读失败时的无损兜底
+
+如果直读返回 0、而摘要却报告车里**有**东西，那就说明是**读取路径失效**而不是车空了
+（摘要本身就是从货箱算出来的，它能非空就说明货箱里有货）。
+这种情况下 `cargoWeightOf` 会改读**实体存档 NBT 的 `"Items"`**：
+那条路走的是 `addAdditionalSaveData`，与 `getContainerSize` / `ITEM_HANDLER` 能力无关，
+数据与货箱一一对应，用纯原版 `ItemStack.of` 解析，不引用任何 AstikorCarts 类型。
+
+同时会打一条**不需要开诊断开关**的警告（按车 60 秒限流）：
+
+```
+[terras_horsies] 马车 tfcastikorcarts:supply_cart#123 的货箱直读返回 0，但渲染摘要报告有货
+——已改用存档 NBT 兜底（重量约 4608，摘要读数 1234）。这通常意味着货箱读取路径在该环境下失效…
+```
+
+看到这条日志就说明直读那条路在你的环境里确实读不出东西，把上下文发出来即可定位。
 
 #### 事实二：`shouldStopPulledTick()` 会绕过 `setPulling` 直接写字段
 
