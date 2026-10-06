@@ -1369,20 +1369,38 @@ cd bench
 
 TFC 的驴和骡可以用箱子右键装上箱子（箱子本身是个物品，走
 `TFCChestedHorse.getChestItem()/setChestItem()`），箱子里的东西理应与骑手、马车一样
-压在身上。实现落在 {@code LoadManager.carriedLoadOf}：
+压在身上。实现落在 `LoadManager.carriedLoadOf`：
 
 ```
 loadOf = carriedLoadOf(自己带着的) + passengerLoadOf(乘客) + cartLoadFor(拉着的车)
 ```
 
-**读法用纯原版 {@code Entity.getSlot(int)}，不引用 TFC 的任何类型**：
+**箱子内容在哪里（这条差点写错，记下来）：**
 
-- TFC 的 {@code TFCDonkey}/{@code TFCMule} 继承 {@code TFCChestedHorse}，
-  后者继承原版 {@code AbstractChestedHorse}；箱子格正是通过
-  {@code m_141942_}（{@code getSlot}）暴露的（TFC 在那里返回自己的 {@code SlotAccess}）。
-- 越界时上游返回 {@code SlotAccess.NULL}，遇到就停 —— **因此不需要知道箱子有几格**，
-  原版驴 5 格、骡 5 格、羊驼 3~15 格都能自适应（上限 {@code MAX_CARRIED_SLOTS = 32} 只是安全值）。
-- **玩家不走这条**：玩家背包由 More Attributes 按 {@code equip_load_current} 自己算，
+`TFCDonkey`/`TFCMule` → `TFCChestedHorse` → 原版 `AbstractChestedHorse` → `AbstractHorse`，
+而货箱就是 **`AbstractHorse.inventory`** 这个 `SimpleContainer`：
+
+| `hasChest()` | `getInventorySize()` | 布局 |
+|---|---|---|
+| false | 2 | 0 = 鞍、1 = 马铠 |
+| true | **17** | 0 = 鞍、1 = 马铠、**2..16 = 那 15 格箱子** |
+
+**不要用 `Entity.getSlot(i)` 去读箱子**（第一版就是这么漏掉的，实测无效）：
+原版只通过它暴露 **400/401**（鞍与马铠，映射到 inventory 的 0/1）和
+**499**（TFC 用它放"箱子物品"本身，走 `getChestItem()/setChestItem()`），
+**箱子内容根本不在 `getSlot` 里**。而且 `getSlot(0)` 返回 `SlotAccess.NULL`，
+「遇到 NULL 就停」的循环会在第一步就退出。
+
+**正确入口是 Forge 给马提供的 `ITEM_HANDLER` 能力**：
+`AbstractHorse.getCapability` 返回一个 `InvWrapper`，里面包的正是那个 `SimpleContainer`
+（字节码里 `lambda$createInventory$7 -> new InvWrapper(container)`）。
+所以从索引 **2** 开始累加——鞍与马铠是「穿戴」，不是「携带」。
+
+`loadOf = carriedLoadOf(自己带着的) + passengerLoadOf(乘客) + cartLoadFor(拉着的车)`
+
+- 该能力对**所有** `AbstractHorse` 都成立（原版驴/骡/羊驼、TFC 的马/驴/骡、Icy 的马），
+  没有箱子的马只有 2 格，从索引 2 起自然是 0，行为不变。
+- **玩家不走这条**：玩家背包由 More Attributes 按 `equip_load_current` 自己算，
   这里再算一遍就是同一批物品罚两次。
 
 #### 二、解除车厢的物品尺寸上限

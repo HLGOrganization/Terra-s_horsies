@@ -17,7 +17,6 @@ import net.minecraft.nbt.ListTag;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
-import net.minecraft.world.entity.SlotAccess;
 import net.minecraft.world.entity.ai.attributes.Attribute;
 import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
@@ -60,13 +59,10 @@ public final class LoadManager {
     private static final int MAX_TRAIN_LENGTH = 8;
 
     /**
-     * 读坐骑「自己带着的东西」时最多探几格。
-     *
-     * <p>用 {@code Entity.getSlot(i)} 逐格试探、遇到 {@code SlotAccess.NULL} 停，
-     * 所以这个数只是个安全上限（原版驴 5 格、骡 5 格、羊驼 3~15 格、
-     * TFC 有箱子马按配置最多十几格）。
+     * 马自己那个物品栏里，属于「穿戴」的前两格：0 = 鞍、1 = 马铠。
+     * 之后才是箱子内容（有箱子的驴/骡/羊驼共 15 格）。
      */
-    private static final int MAX_CARRIED_SLOTS = 32;
+    private static final int HORSE_EQUIPMENT_SLOTS = 2;
 
     /** 每辆车最近一次可信的货物重量：{重量, 记录时的 gameTime}。 */
     private static final Map<UUID, double[]> CARGO_MEMORY = new ConcurrentHashMap<>();
@@ -160,26 +156,31 @@ public final class LoadManager {
      * <p>用户需求：TFC 的驴和骡可以用箱子右键装上箱子装东西，
      * 箱子里的货物也应该压在它们身上。
      *
-     * <p>读法用原版 {@code Entity.getSlot(int)}，**不引用 TFC 的任何类型**：
-     * TFC 的 {@code TFCChestedHorse} 继承原版 {@code AbstractChestedHorse}，
-     * 箱子内容正是通过 {@code m_141942_}（{@code getSlot}）暴露出来的
-     * （它内部返回一个 {@code SlotAccess}）。越界的槽位上游返回
-     * {@code SlotAccess.NULL}，遇到就停——这样不需要知道箱子有几格。
+     * <p><b>箱子内容在哪：</b>{@code TFCDonkey}/{@code TFCMule} →
+     * {@code TFCChestedHorse} → 原版 {@code AbstractChestedHorse} → {@code AbstractHorse}，
+     * 货箱就是 {@code AbstractHorse.inventory} 这个 {@code SimpleContainer}：
+     * 没箱子时 2 格（0 = 鞍、1 = 马铠），有箱子时 17 格（2..16 是那 15 格箱子）。
      *
-     * <p>玩家不走这条：玩家背包由 More Attributes 自己按 {@code equip_load_current} 算，
+     * <p><b>为什么不用 {@code getSlot(i)}：</b>原版只通过它暴露 400/401（鞍与马铠）
+     * 和 499（TFC 用它放"箱子物品"本身），<b>箱子内容根本不在里面</b>——
+     * 实测第一版就是这么漏掉的。正确入口是 Forge 为马提供的
+     * {@code ITEM_HANDLER} 能力（{@code AbstractHorse.getCapability} 返回一个
+     * 包着那个 {@code SimpleContainer} 的 {@code InvWrapper}）。
+     * 因此从索引 2 开始累加：鞍与马铠是"穿戴"不是"携带"。
+     *
+     * <p>玩家不走这条：玩家背包由 More Attributes 按 {@code equip_load_current} 自己算，
      * 这里再算一遍就是同一批物品罚两次。
      */
     private static double carriedLoadOf(LivingEntity entity) {
-        if (entity instanceof Player) {
+        if (entity instanceof Player || !(entity instanceof AbstractHorse)) {
             return 0.0D;
         }
         double sum = 0.0D;
-        for (int slot = 0; slot < MAX_CARRIED_SLOTS; slot++) {
-            final SlotAccess access = entity.getSlot(slot);
-            if (access == null || access == SlotAccess.NULL) {
-                break;
+        final IItemHandler handler = entity.getCapability(ForgeCapabilities.ITEM_HANDLER).orElse(null);
+        if (handler != null) {
+            for (int slot = HORSE_EQUIPMENT_SLOTS; slot < handler.getSlots(); slot++) {
+                sum += MoreAttributesApi.itemWeight(handler.getStackInSlot(slot));
             }
-            sum += MoreAttributesApi.itemWeight(access.get());
         }
         return sum;
     }
