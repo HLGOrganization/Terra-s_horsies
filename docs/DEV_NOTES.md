@@ -1698,9 +1698,13 @@ Caused by: ClassNotFoundException: com.tfcicys.horses.taming.TfcEquineTaming
 发现就拒绝退出（`-Force` 可强行，但不建议），并顺带校验 jar 里的关键条目、打印 SHA1。
 README 的构建一节已改为「部署请用脚本，不要手动 Copy-Item」。
 
-> 脚本本身有个坑要记住：必须保存为 **UTF-8 with BOM**。Windows PowerShell 5.1 对
-> 无 BOM 的 UTF-8 会按 ANSI 解析，中文乱码、变量被吞，`if` 判断随之失效
-> —— 第一次试跑就是这样静默失效的。
+> 脚本本身有两个坑，都踩过了：
+> 1. **不能写中文**。Windows PowerShell 5.1 把无 BOM 的 UTF-8 按 ANSI 解析，
+>    带中文的第一版因此乱码、变量被吞、`if` 判断静默失效（守卫形同虚设）。
+>    加 BOM 可以解决，但任何一次编辑都会把 BOM 抹掉（第二次就这么翻车的，
+>    直接语法错误）。最终定为**纯 ASCII**：中文说明只留在本文档。
+> 2. **实例目录名本身是中文**（`D:\线框的服务器\…`），不能写成字面量，
+>    改用通配符 `D:\*\versions\TFC_Wild_Fire\mods` 解析，脚本里就没有非 ASCII 字符了。
 
 ### 14.18 依赖升级后的兼容性核对方法（Icy 2.0.6 → 2.1.0）
 

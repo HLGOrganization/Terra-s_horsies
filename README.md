@@ -133,8 +133,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\deploy.ps1
 崩溃（`NoClassDefFoundError`，因为 Forge 的包索引在启动时就固定了，而文件已被换掉）。
 脚本还会校验 jar 里的关键条目并逐个打印 SHA1。
 
-> `deploy.ps1` 必须保存为 **UTF-8 with BOM**：Windows PowerShell 5.1 对无 BOM 的
-> UTF-8 文件会按 ANSI 解析，中文乱码、变量被吞，判断随之失效。
+> `deploy.ps1` **刻意只写 ASCII**：Windows PowerShell 5.1 会把无 BOM 的 UTF-8
+> 按 ANSI 解析，一旦文件里出现中文，解析就会出错、判断静默失效（曾因此让守卫失灵）。
+> 中文说明一律留在[开发文档](docs/DEV_NOTES.md)；脚本里那个中文的实例路径
+> 是用通配符 `D:\*\versions\TFC_Wild_Fire\mods` 解析出来的。
 
 ## 授权与致谢
 
