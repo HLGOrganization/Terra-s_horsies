@@ -141,26 +141,24 @@ public final class LoadDebug {
     }
 
     /**
-     * 记录一次「同一个实体 id 上出现两个车辆对象」以及判定过程。
+     * 记录一次「同一辆车有多个对象」以及最终选了哪个。
      *
-     * <p>{@code uuid}/{@code inst} 不同而 {@code cartId} 相同，就确认了上游按 id 记账
-     * 造成的状态分叉；{@code sigA}/{@code sigB} 是两者渲染摘要的指纹，
-     * {@code live=/} 是当前认定「玩家正在编辑的那辆」，{@code inLevel=} 说明该对象
-     * 是否能被 {@code level.getEntities().get(uuid)} 找到。
+     * <p>{@code reason} 说明依据：{@code 世界索引} = 世界实体索引里查到的那个（权威）；
+     * {@code 记忆} = 世界索引此刻查不到，用了记住的那个；最后一档是两者都不可用。
+     * {@code chosen}/{@code other} 的 {@code inst} 与 {@code inLevel} 用来核对选择是否正确。
      */
-    public static void cartDuplicate(Entity a, Entity b, int sigA, int sigB, Integer liveInst) {
-        if (a == null) {
+    public static void cartDuplicate(Entity chosen, Entity other, String reason) {
+        if (chosen == null) {
             return;
         }
         try {
             final String line = String.format(
-                    "cartId=%d A(uuid=%s inst=%08x sig=%d inLevel=%s) B(%s) live=%s",
-                    a.getId(), a.getUUID(), System.identityHashCode(a), sigA,
-                    inWorld(a),
-                    b == null ? "无" : String.format("uuid=%s inst=%08x sig=%d inLevel=%s",
-                            b.getUUID(), System.identityHashCode(b), sigB, inWorld(b)),
-                    liveInst == null ? "未定" : String.format("%08x", liveInst));
-            final UUID id = a.getUUID();
+                    "cartId=%d 选用(uuid=%s inst=%08x inLevel=%s) 另一个(%s) 依据=%s",
+                    chosen.getId(), chosen.getUUID(), System.identityHashCode(chosen), inWorld(chosen),
+                    other == null ? "无" : String.format("uuid=%s inst=%08x inLevel=%s",
+                            other.getUUID(), System.identityHashCode(other), inWorld(other)),
+                    reason);
+            final UUID id = chosen.getUUID();
             if (line.equals(LAST_CANDIDATE.get(id))) {
                 return;
             }
@@ -168,9 +166,9 @@ public final class LoadDebug {
                 LAST_CANDIDATE.clear();
             }
             LAST_CANDIDATE.put(id, line);
-            LOGGER.info("[terras_horsies/audit] 车辆对象重复 {}", line);
+            LOGGER.info("[terras_horsies/audit] cart-instance {}", line);
         } catch (final Throwable t) {
-            LOGGER.warn("[terras_horsies/audit] 输出车辆对象重复信息失败", t);
+            LOGGER.warn("[terras_horsies/audit] 输出车辆对象信息失败", t);
         }
     }
 
