@@ -52,6 +52,16 @@ public final class LoadManager {
     /** 每辆车上次报告「直读不出内容」的时刻，按车 60 秒限流。 */
     private static final Map<UUID, Long> lastReadFailureReport = new ConcurrentHashMap<>();
 
+    /** 已经报告过「这辆解出来的车根本没有货箱」的车，每辆只说一次。 */
+    private static final Map<UUID, Boolean> noContainerReported = new ConcurrentHashMap<>();
+
+    /** 沿 {@code drawn} 链最多走几节，防环。 */
+    private static final int MAX_TRAIN_LENGTH = 8;
+
+    /** 缓存反射找到的 {@code drawn} 字段；找不到的类单独记下来，避免反复抛异常。 */
+    private static final Map<Class<?>, java.lang.reflect.Field> DRAWN_FIELDS = new ConcurrentHashMap<>();
+    private static final java.util.Set<Class<?>> NO_DRAWN_FIELD = ConcurrentHashMap.newKeySet();
+
     /** 马匹负重上限的修饰符。 */
     private static final UUID ANIMAL_SPEED_UUID = UUID.fromString("3c1a7e90-5b24-4d18-9f60-2ab7c0d4e815");
     private static final UUID ANIMAL_JUMP_UUID = UUID.fromString("7d2b4f61-8a35-4c92-b1e7-50f3a9c6d208");
@@ -152,8 +162,8 @@ public final class LoadManager {
         if (!TfcIcysHorses.hasTfcAstikorCarts()) {
             return 0.0D;
         }
-        final Entity cart = CartPullRegistry.cartOf(puller);
-        if (cart == null) {
+        final Entity head = CartPullRegistry.cartOf(puller);
+        if (head == null) {
             return 0.0D;
         }
 
@@ -162,9 +172,58 @@ public final class LoadManager {
 
         // 自重不减免：无论挽马与否都是全额。
         final double base = c.cartBaseLoad.get();
-        final double cargo = cargoWeightOf(cart);
         final double cargoFactor = draftCart ? c.draftCartFactor.get() : c.cartCargoFactor.get();
-        return base + cargo * cargoFactor;
+
+        // 马后面可能挂着不止一辆车：TFC 有「牵引车」这种自己再拖一节的车，
+        // 那种情况下马直接拉的是牵引车（自重 512、没有货箱），
+        // 真正的货物在它拖着的下一节里。整列的总重都该由拉车者承担，
+        // 所以沿 drawn 链一路累加。没有链条时循环只跑一次，行为与从前完全一致。
+        double total = 0.0D;
+        Entity cart = head;
+        for (int depth = 0; cart != null && depth < MAX_TRAIN_LENGTH; depth++) {
+            total += base + cargoWeightOf(cart) * cargoFactor;
+            cart = drawnByOf(cart);
+        }
+        return total;
+    }
+
+    /**
+     * 这辆车拖着的下一节（上游 {@code AbstractDrawnEntity.drawn} 字段）。
+     *
+     * <p>用反射而不是直接引用类型：AstikorCarts 是可选依赖，
+     * 它的类名不能出现在我们的常量池里（见 {@code MoreAttributesApi} 的说明）。
+     * 字段是 {@code protected}，所以沿继承链找 {@code getDeclaredField}；
+     * 找不到（不是可牵引的车）就缓存下来，避免每次 tick 都抛一次异常。
+     */
+    private static Entity drawnByOf(Entity cart) {
+        try {
+            final Class<?> type = cart.getClass();
+            java.lang.reflect.Field field = DRAWN_FIELDS.get(type);
+            if (field == null && !NO_DRAWN_FIELD.contains(type)) {
+                Class<?> cursor = type;
+                while (cursor != null && field == null) {
+                    try {
+                        field = cursor.getDeclaredField("drawn");
+                    } catch (final NoSuchFieldException next) {
+                        cursor = cursor.getSuperclass();
+                    }
+                }
+                if (field == null) {
+                    NO_DRAWN_FIELD.add(type);
+                    return null;
+                }
+                field.setAccessible(true);
+                DRAWN_FIELDS.put(type, field);
+            }
+            return field == null ? null : (field.get(cart) instanceof Entity drawn ? drawn : null);
+        } catch (final Throwable t) {
+            return null;
+        }
+    }
+
+    /** 这辆车的货箱格数；不是 {@code Container} 时返回 -1。 */
+    private static int containerSlotsOf(Entity cart) {
+        return cart instanceof net.minecraft.world.Container container ? container.getContainerSize() : -1;
     }
 
     /**
@@ -200,7 +259,7 @@ public final class LoadManager {
             return direct;
         }
 
-        // 直读为 0。两种可能必须分开：车真的空了，或这条路在你的环境里读不出东西。
+        // 直读为 0。三种可能必须分开：车真的空了、读取路径失效、或索引指错了车。
         // 摘要（getCargo）有货就说明货箱里确实有东西，于是走无损兜底：实体存档 NBT。
         // 上游把货箱写在 "Items" 键下（AbstractDrawnInventoryEntity#addAdditionalSaveData
         // 里 tag.put("Items", inventory.serializeNBT())），这份数据和货箱一一对应，
@@ -215,6 +274,16 @@ public final class LoadManager {
                 LoadDebug.cargoRead(cart, fromNbt, summary);
                 return fromNbt;
             }
+        }
+
+        // 兜底也没货：如果这辆车压根没有货箱（不是 Container，或格数为 0），
+        // 那多半是索引指向的车不对——最典型的是马直接拉着一辆「牵引车」，
+        // 真正的货箱挂在它拖着的那一节上。每辆车只报一次，不会刷屏。
+        if (!cart.level().isClientSide() && containerSlotsOf(cart) <= 0 && noContainerReported.putIfAbsent(cart.getUUID(), Boolean.TRUE) == null) {
+            LOGGER.warn("[terras_horsies] 为拉车者解出的马车 {}#{} 没有货箱（Container={}）。"
+                            + "若你实际装货的是另一节车（例如中间有牵引车），请把这一行连同马车编组一起反馈——"
+                            + "这代表负重挂到了错误的车上。",
+                    cart.getType(), cart.getId(), containerSlotsOf(cart) >= 0);
         }
         LoadDebug.cargoRead(cart, direct, summary);
         return direct;

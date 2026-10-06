@@ -1471,6 +1471,37 @@ return true;
 诊断里对应两个字段：`fieldPuller=`（上游字段说谁在拉）与
 `drift=`（索引与字段是否不一致），见 `LoadDebug.dumpHorse`。
 
+#### 事实三：马车可能是「编组」，马直接拉的未必是货箱车
+
+TFC AstikorCarts 里有**牵引车**（postilion）这种「自己再拖一节」的车。
+此时马只拉第一节，**真正的货箱在它拖着的那一节上**。
+如果负重只算马直接拉的那一辆，货箱车的货物就永远算不到马头上——
+表现是「马车上装什么都不会算，只剩 512 自重」，而且**不会报任何异常**，
+因为第一节确实是个合法的、只是没有货箱的车。
+
+因此 `cartLoadFor` 现在沿 `drawn` 链**整列累加**：
+
+```java
+for (Entity cart = head; cart != null && depth < MAX_TRAIN_LENGTH; depth++) {
+    total += base + cargoWeightOf(cart) * cargoFactor;
+    cart = drawnByOf(cart);          // 上游 protected 字段 drawn，反射读取
+}
+```
+
+- 没有链条时循环只跑一次，与从前的行为**完全一致**（零回归风险）；
+- `drawn` 用反射读（AstikorCarts 是可选依赖，它的类型名不能进我们的常量池），
+  找不到该字段的类会缓存下来，避免反复抛异常；
+- 最多走 8 节防环；
+- 每节都计入自重与货物，系数按拉车者是否挽马统一施加。
+
+另外补了一条**不需要开关**的警告：为拉车者解出的车**根本没有货箱**
+（不是 `Container` 或格数为 0）时，每辆车报一次。看到它就说明负重挂到了错误的车上：
+
+```
+[terras_horsies] 为拉车者解出的马车 tfcastikorcarts:plow#123 没有货箱（Container=false）。
+若你实际装货的是另一节车（例如中间有牵引车），请把这一行连同马车编组一起反馈——这代表负重挂到了错误的车上。
+```
+
 ---
 
 ## 15. TFC 金属马铠的外观
