@@ -16,7 +16,9 @@
     "AbstractHorseDeathFrightMixin",
     "AbstractDrawnEntityPullMixin",
     "SupplyCartOverburdenMixin",
-    "AnimalCartOverburdenMixin"
+    "AnimalCartOverburdenMixin",
+    "HorsePlacementReleaseMixin",
+    "HorseWhistleReleaseMixin"
   ],
   "client": [
     "BhHorseHudMixin",

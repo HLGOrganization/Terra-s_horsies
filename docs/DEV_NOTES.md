@@ -1621,6 +1621,55 @@ for (Entity cart = head; cart != null && depth < MAX_TRAIN_LENGTH; depth++) {
 `source=` 会告诉我们最终采用的是哪条路：若长期都是 `direct`，
 说明下面那条 `memory` 兜底从未生效，可以删掉。
 
+### 14.16 吹哨召回时先「放手」（卸车 + 请下乘客）
+
+**现象**（实测反馈）：用 Icy 的马哨召回一匹拉着车的马时，车厢会跟着马
+**直线飞过来**——尤其是本来根本拉不动那辆车的马，看起来完全违背物理。
+
+**上游的缺口**：Icy 的哨子**自己就会拒绝"有车"的情况**，但它的判据是它自己的马车装备：
+
+```java
+// HorseManagement.whistle(ServerPlayer, UUID)
+if (!ownsStoredHorse(...))  return Outcome.fail("…manage.gone");
+if (hasCart(player, uuid))  return Outcome.fail("…manage.cart_attached");   // ← 只认自己的
+...
+// hasCart → IHorseData.bh_hasCartGear()   或快照里的 BH_Gear 含 ModItems.HORSE_CART
+```
+
+`ModItems.HORSE_CART` 是 **Icy 自己的**马车装备，与 AstikorCarts／TFC 的车毫无关系，
+所以挂着 TFC 车的马照样会被传送，车就被拖着飞过去。
+
+**传送有两条路径，都要管**（不是重复，是两条不同代码路径）：
+
+| 情形 | Icy 的做法 | 我们的挂载点 |
+|---|---|---|
+| 马已加载、距离 > 1024 | `HorsePlacement.teleport(马, 位置)` 直接瞬移 | 同名方法的 HEAD |
+| 马未加载 | 丢旧身体 → 按快照在玩家身边重塑一匹 | `HorseManagement.discardOldBody` 的 HEAD |
+
+第二条必须在**丢旧身体时**就解挂：重塑出来的新马用同一个 UUID，
+而 AstikorCarts 的车是按 `pullingUUID` 记账的（`attemptReattach` 会按 id 重新认领），
+不解挂的话车会在新马出现后立刻重新挂上、再飞一次。
+
+**每处只做三件事**（`WhistleRelease.release`）：
+
+1. `ejectPassengers()`：骑手（玩家或其他生物）先下来，否则会一起被带走；
+2. 解挂马车：`setPulling(null)`——上游「解除挂接」的唯一正规入口，
+   它会清掉 PULL/PULL_SLOWLY 移速修饰符、清空 `pulling`/`pullingUUID`/`pullingId`、
+   通知客户端，并从 `AstikorWorld` 摘掉自己。等价于玩家自己解开车；
+3. `LoadEvents.refreshPuller(马)`：免得传送之后马身上还挂着那辆车的重量。
+
+为什么挂在 `HorsePlacement.teleport` 而不是 `whistle` 的 HEAD：哨子在
+「没有羁绊 / 落点不安全 / Icy 自己的车」时会失败，那种时候**不该**把玩家的车解挂。
+挂在真正执行传送的那一处，语义最准；「送回马厩」也走这个入口，同样受益。
+
+**找车用上游自己的索引**：`AstikorWorld.get(level).getDrawn(puller)`。
+它在内部是 `Int2ObjectMap`、按拉车者 id 记账，而且**即使车处于"停放"状态
+（不在世界实体索引里）也能找到**——这正是 `discardOldBody` 那条路需要的。
+
+为此新增 `AstikorCartsApi`：与 `MoreAttributesApi` 同样的可选依赖隔离手法
+（方法签名只出现 Minecraft 类型，调用方先查 `hasTfcAstikorCarts()`，
+模组缺席时类不会被解析）。
+
 ---
 
 ## 15. TFC 金属马铠的外观
