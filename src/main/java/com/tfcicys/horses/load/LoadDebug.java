@@ -42,6 +42,9 @@ public final class LoadDebug {
     /** 每辆车上次的货物审计摘要（不受开关控制，见 cargoAudit）。 */
     private static final Map<UUID, String> LAST_AUDIT = new ConcurrentHashMap<>();
 
+    /** 每辆车上次报告的「同一 id 两个对象」信息。 */
+    private static final Map<UUID, String> LAST_CANDIDATE = new ConcurrentHashMap<>();
+
     /** 已经报告过「属性缺失」的实体类型，每种只报一次。 */
     private static final Set<String> MISSING_REPORTED = ConcurrentHashMap.newKeySet();
 
@@ -138,6 +141,36 @@ public final class LoadDebug {
     }
 
     /**
+     * 记录一次「同一个实体 id 上出现两个车辆对象」。
+     *
+     * <p>这是对上游按 id 记账（{@code AstikorWorld} 的 {@code Int2ObjectMap} +
+     * {@code level.getEntity(id)}）的直接取证：{@code uuid}/{@code inst} 不同而
+     * {@code cartId} 相同，就确认了这个成因。只在真正发生替换时输出一次。
+     */
+    public static void cargoCandidate(Entity adopted, Entity rejected) {
+        if (adopted == null || rejected == null) {
+            return;
+        }
+        try {
+            final String line = String.format(
+                    "cartId=%d 采用世界里的对象(uuid=%s inst=%08x)，丢弃索引里的副本(uuid=%s inst=%08x)",
+                    adopted.getId(), adopted.getUUID(), System.identityHashCode(adopted),
+                    rejected.getUUID(), System.identityHashCode(rejected));
+            final UUID id = adopted.getUUID();
+            if (line.equals(LAST_CANDIDATE.get(id))) {
+                return;
+            }
+            if (LAST_CANDIDATE.size() > 256) {
+                LAST_CANDIDATE.clear();
+            }
+            LAST_CANDIDATE.put(id, line);
+            LOGGER.info("[terras_horsies/audit] 车辆对象重复 {}", line);
+        } catch (final Throwable t) {
+            LOGGER.warn("[terras_horsies/audit] 输出车辆对象重复信息失败", t);
+        }
+    }
+
+    /**
      * 货物读数的<b>审计</b>记录：刻意<b>不受 {@code debugLoad} 开关控制</b>。
      *
      * <p>存在的理由：有些故障在日志里完全静默——读取既不抛异常、也不触发任何警告，
@@ -145,26 +178,32 @@ public final class LoadDebug {
      * 只在<b>某辆车的读数发生变化</b>时输出一行，所以一局游戏只会多出几条到几十条
      * INFO，而不是刷屏。
      *
-     * <p>行里同时给出：解出的车是谁、有没有货箱、格数、直读读数、摘要读数、
-     * 最终采用值，以及直读与摘要各自的逐格内容。据此足以区分：
+     * <p>行里同时给出：解出的车是谁（含 UUID 与实例标识，用来分辨「同一辆车的两个实例」）、
+     * 有没有货箱、格数、直读读数、摘要读数、最终采用值及其来源，以及两边的逐格内容。
+     * 据此足以区分：
      * <ul>
      *   <li>{@code inv=[...]} 有货 → 重量算法没问题；</li>
-     *   <li>{@code inv=[]} 全空而 {@code cargo=[...]} 有货 → 读到的不是装货的那份数据；</li>
+     *   <li>{@code inv=[]} 全空而 {@code cargo=[...]} 有货 → 这一次读数返回了空，
+     *       但车里有货（这就是「直读忽真忽空」的现场）；</li>
+     *   <li>{@code uuid}/{@code inst} 在两次读数之间发生变化 → 是同一辆车的两个实体实例；</li>
      *   <li>两者都空 → 这辆车当时确实没有货物（或负重挂到了别的车上）。</li>
      * </ul>
      */
-    public static void cargoAudit(Entity cart, double direct, double summary, double resolved) {
+    public static void cargoAudit(Entity cart, double direct, double summary, double resolved, String source) {
         if (cart == null) {
             return;
         }
         try {
             final String line = describe(false, cart)
-                    + String.format(" container=%s slots=%d direct=%.0f summary=%.0f resolved=%.0f",
+                    + String.format(" uuid=%s inst=%08x container=%s slots=%d direct=%.0f summary=%.0f resolved=%.0f source=%s",
+                            cart.getUUID(),
+                            System.identityHashCode(cart),
                             cart instanceof net.minecraft.world.Container,
                             cart instanceof net.minecraft.world.Container c ? c.getContainerSize() : -1,
                             direct,
                             summary,
-                            resolved)
+                            resolved,
+                            source)
                     + " inv=" + slotContents(cart, false)
                     + " cargo=" + slotContents(cart, true);
             final UUID id = cart.getUUID();

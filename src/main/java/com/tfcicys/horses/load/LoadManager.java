@@ -58,6 +58,23 @@ public final class LoadManager {
     /** 沿 {@code drawn} 链最多走几节，防环。 */
     private static final int MAX_TRAIN_LENGTH = 8;
 
+    /** 每辆车最近一次可信的货物重量：{重量, 记录时的 gameTime}。 */
+    private static final Map<UUID, double[]> CARGO_MEMORY = new ConcurrentHashMap<>();
+
+    /**
+     * 同一份记忆的「按实体 id」索引。
+     *
+     * <p>为什么要两份索引：实测的抖动是**同一辆车相隔 25 ms 一次读到真值、一次读到空**
+     * （连存档 NBT 也读不到），而这有可能来自「同一辆车的两个实体实例」——
+     * 那种情况下 UUID 未必相同，但审计日志里两次的**实体 id 都是 13**。
+     * 按 id 再存一份，两种成因都能覆盖。类型必须一致才认，避免 id 回收后串味。
+     */
+    private static final Map<Integer, double[]> CARGO_MEMORY_BY_ID = new ConcurrentHashMap<>();
+    private static final Map<Integer, String> CARGO_ID_TYPE = new ConcurrentHashMap<>();
+
+    /** 可信重量的有效期（tick）。100 tick = 5 秒，且摘要一旦变空就立即作废。 */
+    private static final int CARGO_MEMORY_TICKS = 100;
+
     /** 缓存反射找到的 {@code drawn} 字段；找不到的类单独记下来，避免反复抛异常。 */
     private static final Map<Class<?>, java.lang.reflect.Field> DRAWN_FIELDS = new ConcurrentHashMap<>();
     private static final java.util.Set<Class<?>> NO_DRAWN_FIELD = ConcurrentHashMap.newKeySet();
@@ -162,10 +179,25 @@ public final class LoadManager {
         if (!TfcIcysHorses.hasTfcAstikorCarts()) {
             return 0.0D;
         }
-        final Entity head = CartPullRegistry.cartOf(puller);
+        Entity head = CartPullRegistry.cartOf(puller);
         if (head == null) {
             return 0.0D;
         }
+        // 同一个实体 id 上可能同时存在两个车辆对象。上游是按**实体 id** 记账的
+        // （AstikorWorld 里就是 Int2ObjectMap<AbstractDrawnEntity>，attemptReattach
+        // 也用 level.getEntity(id) 找回拉车者），所以「世界里的那辆」与
+        // 「索引里那份副本」可以并存，并且轮流覆盖我们这张表。
+        // 实测现象：同一个 id、相隔 25 ms，一次读到 12560、一次读到 0。
+        //
+        // 判定办法：**无条件以世界里的那辆为准**——玩家右键打开界面写进去的是它，
+        // 车上渲染出货物的也是它。副本只可能是一份过期的空壳。
+        // （刻意不写成「取货物更大的那个」：那会让「清空后仍读到旧值」的毛病回来。）
+        final Entity inWorld = head.level().getEntity(head.getId());
+        if (inWorld != null && inWorld != head) {
+            LoadDebug.cargoCandidate(inWorld, head);
+            head = inWorld;
+        }
+        final double bestCargo = cargoWeightOf(head);
 
         final TFCICYSConfig.Common c = TFCICYSConfig.COMMON;
         final boolean draftCart = puller instanceof LivingEntity living && HorseCategory.of(living).isDraft();
@@ -178,9 +210,12 @@ public final class LoadManager {
         // 那种情况下马直接拉的是牵引车（自重 512、没有货箱），
         // 真正的货物在它拖着的下一节里。整列的总重都该由拉车者承担，
         // 所以沿 drawn 链一路累加。没有链条时循环只跑一次，行为与从前完全一致。
-        double total = 0.0D;
-        Entity cart = head;
-        for (int depth = 0; cart != null && depth < MAX_TRAIN_LENGTH; depth++) {
+        //
+        // 首节用的是上面已经选好的读数（bestCargo），不再重复读一次——
+        // 重复读有可能又抽到那份空副本。
+        double total = base + bestCargo * cargoFactor;
+        Entity cart = drawnByOf(head);
+        for (int depth = 1; cart != null && depth < MAX_TRAIN_LENGTH; depth++) {
             total += base + cargoWeightOf(cart) * cargoFactor;
             cart = drawnByOf(cart);
         }
@@ -253,35 +288,52 @@ public final class LoadManager {
      * 而且全模组共用一个静态值、多辆车会互相串味。
      */
     public static double cargoWeightOf(Entity cart) {
+        final boolean server = !cart.level().isClientSide();
         final double direct = readCargoDirect(cart);
         if (direct > 0.0D) {
+            rememberCargo(cart, direct);
             final double summary = syncedSummaryWeightForDiagnosisOnly(cart);
             LoadDebug.cargoRead(cart, direct, summary);
-            LoadDebug.cargoAudit(cart, direct, summary, direct);
+            LoadDebug.cargoAudit(cart, direct, summary, direct, "direct");
             return direct;
         }
 
         // 直读为 0。三种可能必须分开：车真的空了、读取路径失效、或索引指错了车。
-        // 摘要（getCargo）有货就说明货箱里确实有东西，于是走无损兜底：实体存档 NBT。
-        // 上游把货箱写在 "Items" 键下（AbstractDrawnInventoryEntity#addAdditionalSaveData
-        // 里 tag.put("Items", inventory.serializeNBT())），这份数据和货箱一一对应，
-        // 而且不经过 getContainerSize / ITEM_HANDLER 能力这两条可能出问题的路。
+        // 摘要（getCargo）在「车里有没有货」这件事上是可靠的：它由货箱内容变化时
+        // 整体重建（TFCSupplyCartEntity$1.onContentsChanged），清空必然立刻变空。
+        // 它只是<b>不能给出数量</b>（只保留前 N 种、数量还按 k 摊开），所以只当判据用。
         final double summary = syncedSummaryWeightForDiagnosisOnly(cart);
         double resolved = 0.0D;
-        // 只在服务端兜底：客户端读到 0 是正常的（货箱不同步），
-        // 而摘要会同步过去，走兜底只会白跑一遍序列化并误报警告。
-        if (summary > 0.0D && !cart.level().isClientSide()) {
+        String source = "empty";
+        if (summary > 0.0D && server) {
+            // 兜底一：实体存档 NBT 的 "Items"。无损，且不经过容器/能力这两条路。
             final double fromNbt = cargoWeightFromSavedNbt(cart);
             if (fromNbt > 0.0D) {
                 reportReadFailure(cart, summary, fromNbt);
+                rememberCargo(cart, fromNbt);
                 resolved = fromNbt;
+                source = "nbt";
+            } else {
+                // 兜底二：两条路都读到空、但摘要说车里有货 —— 这就是
+                // 「读数不稳定地返回空」的现场（实测同一辆车相隔 25 ms
+                // 一次 12560 一次 0）。此时沿用该车最近一次可信读数，
+                // 并且只在摘要仍然说「有货」期间有效。
+                final double remembered = recallCargo(cart);
+                if (remembered > 0.0D) {
+                    resolved = remembered;
+                    source = "memory";
+                }
             }
+        }
+        if (summary <= 0.0D) {
+            // 车真的空了：立刻清掉记忆，绝不让它像旧实现那样永远冻住。
+            forgetCargo(cart);
         }
 
         // 兜底也没货：如果这辆车压根没有货箱（不是 Container，或格数为 0），
         // 那多半是索引指向的车不对——最典型的是马直接拉着一辆「牵引车」，
         // 真正的货箱挂在它拖着的那一节上。每辆车只报一次，不会刷屏。
-        if (resolved == 0.0D && !cart.level().isClientSide()
+        if (resolved == 0.0D && server
                 && containerSlotsOf(cart) <= 0
                 && noContainerReported.putIfAbsent(cart.getUUID(), Boolean.TRUE) == null) {
             LOGGER.warn("[terras_horsies] 为拉车者解出的马车 {}#{} 没有货箱（Container={}）。"
@@ -290,8 +342,54 @@ public final class LoadManager {
                     cart.getType(), cart.getId(), containerSlotsOf(cart) >= 0);
         }
         LoadDebug.cargoRead(cart, direct, summary);
-        LoadDebug.cargoAudit(cart, direct, summary, resolved);
+        LoadDebug.cargoAudit(cart, direct, summary, resolved, source);
         return resolved;
+    }
+
+    /**
+     * 记住这辆车最近一次可信的货物重量。
+     *
+     * <p>为什么需要它：实测直读会「忽真忽空」——同一辆车、同一头马、相隔 25 ms，
+     * 一次读到 12560（785 根原木 × 16，完全正确），下一次整箱读成空，
+     * 连存档 NBT 里也读不到东西。负重因此一直在真值与裸车重之间抖，
+     * 玩家看到的就是「马车上的货完全不算」。
+     *
+     * <p>与旧实现（全局静态的 {@code lastKnownCargo}）的三点关键区别：
+     * <ol>
+     *   <li><b>按车保存</b>：多辆车不会互相串味；</li>
+     *   <li><b>清空立刻失效</b>：摘要变空说明车真的空了，记忆当场丢弃；</li>
+     *   <li><b>会刷新</b>：只要再有任意一次读成功，值立刻更新成新的。</li>
+     * </ol>
+     */
+    private static void rememberCargo(Entity cart, double weight) {
+        final double[] entry = new double[] {weight, cart.level().getGameTime()};
+        CARGO_MEMORY.put(cart.getUUID(), entry);
+        CARGO_MEMORY_BY_ID.put(cart.getId(), entry);
+        CARGO_ID_TYPE.put(cart.getId(), String.valueOf(cart.getType()));
+    }
+
+    /** 取回最近一次可信读数；超过有效期、或换成了别的车就当作没有。 */
+    private static double recallCargo(Entity cart) {
+        double[] remembered = CARGO_MEMORY.get(cart.getUUID());
+        if (remembered == null && String.valueOf(cart.getType()).equals(CARGO_ID_TYPE.get(cart.getId()))) {
+            remembered = CARGO_MEMORY_BY_ID.get(cart.getId());
+        }
+        if (remembered == null) {
+            return 0.0D;
+        }
+        if (cart.level().getGameTime() - (long) remembered[1] > CARGO_MEMORY_TICKS) {
+            forgetCargo(cart);
+            return 0.0D;
+        }
+        return remembered[0];
+    }
+
+    private static void forgetCargo(Entity cart) {
+        CARGO_MEMORY.remove(cart.getUUID());
+        if (String.valueOf(cart.getType()).equals(CARGO_ID_TYPE.get(cart.getId()))) {
+            CARGO_MEMORY_BY_ID.remove(cart.getId());
+            CARGO_ID_TYPE.remove(cart.getId());
+        }
     }
 
     /**
