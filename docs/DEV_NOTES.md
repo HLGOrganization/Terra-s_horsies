@@ -1735,6 +1735,52 @@ refmap 条目方向：com/tfcicys/horses/mixin/<我们的类> → {"<开发名>(
 - `remap = false` 的 Icy 自有方法 7 处 **全部存在**；
 - 原版侧 7 处 SRG 目标 **全部存在**，含新增的 `AbstractHorse.inventory` → `f_30520_`。
 
+### 14.19 「箱子负重没生效」的真正原因：Jade 在客户端重算（服务端一直是对的）
+
+这条排查绕了三轮，值得完整记下来，因为**现象与原因完全不在一个地方**。
+
+**现象**：驴/骡装上箱子、往里放重物，看 Jade 的负重行**纹丝不动**。
+（玩家是用 Jade 看负重的，这一点是决定性线索。）
+
+**服务端侧其实一直是好的**。埋的探针给出了铁证：
+
+```
+[terras_horsies/audit] chest mount=entity.tfc.donkey#3 invSize=17 weight=0   inv=[1:metal/horseshoes/red_steel x1]
+[terras_horsies/audit] chest mount=entity.tfc.donkey#3 invSize=17 weight=256 inv=[1:metal/horseshoes/red_steel x1, 2:anvil x4]
+```
+
+- `invSize=17` 说明读的正是那个箱子（0=鞍、1=马掌、2..16=箱子 15 格；TFC 用马掌代替马铠）；
+- 放入 4 个铁砧后负重 **0 → 256**，而 `updateAnimal` 会把 `loadOf()` 的结果直接
+  `setBaseValue` 进 `equip_load_current` —— 与拉车负重走同一段代码，那条玩家已验证可用。
+
+**原因**：`IcyHorseJadePlugin.appendLoadLine` 里写的是
+
+```java
+final int current = LoadManager.loadOf(living);   // ← 在客户端算
+```
+
+而 Jade 的提示框是在**客户端**拼的，箱子与车厢的内容**都不会同步到客户端**：
+`AbstractHorse.inventory`（箱子）与马车的货箱在客户端都是空的。
+于是服务端算出 256、客户端算出 0，玩家看到的就是"没生效"。
+
+> **同一课在马车上已经记过一次**（`LoadManager#updatePlayer` 的注释：
+> "马车货箱不同步到客户端，这里算出来的货物重量恒为 0")。
+> 这次是把它写在了**读取端**而不是写入端，所以又踩了一遍。
+
+**修法**：显示改读**同步下来的属性** —— `equip_load_current` 的 `getValue()`
+（服务端算惩罚时用的也是它，显示值与生效值必然一致）；
+上限仍取 `capOf`（只由配置与衰老推导，不读任何容器，客户端算出来与服务端一致）。
+读不到属性时显示 `?`，不假装是 0。
+
+**由此确立一条硬规则**：
+
+> **客户端代码只能读同步数据（属性、同步实体数据、配置），不得重算任何
+> 依赖服务端容器的量。** 集装箱、车厢、箱子都属此类。
+
+**排查手法**（这次真正破案的工具）：把「算出来的值」与「写进属性的值」**并排打出来**
+（`chestProbe` + `appliedProbe`：`computedLoad= / computedCap= / attrCur= / attrMax=`）。
+只看其中一边永远说不清是"没算"还是"算了但没落地"；两边摆在一起，一眼就能定位到读取端。
+
 ---
 
 ## 15. TFC 金属马铠的外观

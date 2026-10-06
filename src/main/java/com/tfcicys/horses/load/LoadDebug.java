@@ -223,6 +223,53 @@ public final class LoadDebug {
         }
     }
 
+    /**
+     * 把**最终写进属性**的值也打出来：闭环证明「箱子里的东西真的压在了这匹马身上」。
+     *
+     * <p>为「驴/骡箱子负重没生效」这个问题加的。前面的 {@link #chestProbe} 已经能证明
+     * 算出来的重量随箱子内容变化（实测 4 个铁砧 = 256），但玩家看不到属性那一侧，
+     * 于是分不清是「没算」还是「算了但量太小、减速感觉不到」。
+     * 这一行把两边摆在一起：算出来的 load、上限 cap、属性当前基础值 base。
+     *
+     * <p>同样只在挂着箱子时输出、每匹 10 秒一次，避免刷屏。
+     */
+    public static void appliedProbe(LivingEntity entity, double cap, double load) {
+        if (entity == null) {
+            return;
+        }
+        try {
+            if (entity.getSlot(CHEST_ITEM_SLOT).get().isEmpty()) {
+                return;
+            }
+            final long now = entity.level().getGameTime();
+            final UUID id = entity.getUUID();
+            final Long previous = LAST_APPLIED_PROBE.get(id);
+            if (previous != null && now - previous < 200L) {
+                return;
+            }
+            if (LAST_APPLIED_PROBE.size() > 256) {
+                LAST_APPLIED_PROBE.clear();
+            }
+            LAST_APPLIED_PROBE.put(id, now);
+
+            final Attribute curAttr = MoreAttributesApi.equipLoadCurrent();
+            final Attribute maxAttr = MoreAttributesApi.equipLoadMax();
+            final AttributeInstance cur = curAttr == null ? null : entity.getAttribute(curAttr);
+            final AttributeInstance max = maxAttr == null ? null : entity.getAttribute(maxAttr);
+            LOGGER.info("[terras_horsies/audit] chest-applied mount={}#{} computedLoad={} computedCap={} attrCur={} attrMax={} mounted={} passengers={}",
+                    entity.getType(), entity.getId(), (long) load, (long) cap,
+                    cur == null ? "无属性" : String.valueOf((long) cur.getBaseValue()),
+                    max == null ? "无属性" : String.valueOf((long) max.getBaseValue()),
+                    entity.isPassenger() || !entity.getPassengers().isEmpty(),
+                    entity.getPassengers().size());
+        } catch (final Throwable t) {
+            LOGGER.warn("[terras_horsies/audit] 输出负重落地实况失败", t);
+        }
+    }
+
+    /** 每匹马上次输出「落地实况」的时刻。 */
+    private static final Map<UUID, Long> LAST_APPLIED_PROBE = new ConcurrentHashMap<>();
+
     /** TFC 用来放"箱子物品"本身的槽位号（原版 {@code getSlot} 只在 400/401/499 返回值）。 */
     private static final int CHEST_ITEM_SLOT = 499;
 

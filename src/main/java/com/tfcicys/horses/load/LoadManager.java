@@ -652,6 +652,7 @@ public final class LoadManager {
         // 而绝大多数时候负重根本没变。
         final double cap = capOf(entity);
         final double load = loadOf(entity);
+        LoadDebug.appliedProbe(entity, cap, load);
         final boolean changed = maxInstance.getBaseValue() != cap || curInstance.getBaseValue() != load;
         if (changed) {
             maxInstance.setBaseValue(cap);

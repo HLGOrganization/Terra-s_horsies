@@ -5,6 +5,7 @@ import com.tfcicys.horses.TfcIcysHorses;
 import com.tfcicys.horses.load.HorseCategory;
 import com.tfcicys.horses.load.IcyBreedApi;
 import com.tfcicys.horses.load.LoadManager;
+import com.tfcicys.horses.load.MoreAttributesApi;
 
 import icy.betterhorses.net.entity.BhBreedHorse;
 import net.dries007.tfc.common.entities.livestock.horse.TFCDonkey;
@@ -17,6 +18,8 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.ai.attributes.Attribute;
+import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.animal.horse.AbstractHorse;
 import org.slf4j.Logger;
 import snownee.jade.api.EntityAccessor;
@@ -155,8 +158,16 @@ public class IcyHorseJadePlugin implements IWailaPlugin {
     /**
      * 追加一行负重信息。
      *
-     * <p>上限与当前负重都取自 {@link LoadManager}，也就是超重惩罚真正使用的那些数——
-     * 所以这一行显示的值与游戏行为必然一致，不会出现「显示一个数、实际按另一个数算」。
+     * <p><b>当前负重必须读同步下来的属性，不能在客户端重算。</b>
+     * Jade 的提示框是在客户端拼的，而箱子与车厢的内容都<b>不会同步到客户端</b>：
+     * {@code AbstractHorse.inventory}（驴/骡的箱子）与马车的货箱在客户端都是空的。
+     * 早先这里直接调 {@code LoadManager.loadOf}，于是服务端明明算对了
+     * （实测放进 4 个铁砧 = 256），工具提示却恒等于基础值 ——
+     * 这正是「驴装上箱子后负重没生效」的真正原因：不是没生效，是显示读错了地方。
+     * 同一课在马车上早就记过一次（见 {@code LoadManager#updatePlayer} 的注释）。
+     *
+     * <p>上限则取自 {@link LoadManager#capOf}：它只由配置与衰老推导，不读任何容器，
+     * 客户端算出来的与服务端一致。
      *
      * <p>同时显示移速倍率：它直接反映惩罚是否生效。只看「当前 / 上限」很难判断体感是否合理，
      * 而倍率是最终作用到马身上的那个系数。
@@ -168,11 +179,11 @@ public class IcyHorseJadePlugin implements IWailaPlugin {
         try {
             final HorseCategory category = HorseCategory.of(living);
             final int cap = LoadManager.capOf(living);
-            final int current = LoadManager.loadOf(living);
+            final Integer current = syncedLoad(living);
 
             // 与 applyPenalty 同一个公式，保证显示值与实际减速一致。
             final String ratio;
-            if (cap <= 0) {
+            if (current == null || cap <= 0) {
                 ratio = "—";
             } else {
                 final double r = (double) current / cap;
@@ -180,9 +191,10 @@ public class IcyHorseJadePlugin implements IWailaPlugin {
                 ratio = String.format(java.util.Locale.ROOT, "%.2f×", mult);
             }
 
+            final String shown = current == null ? "?" : Integer.toString(current);
             tooltip.add(Component.literal(String.format(java.util.Locale.ROOT,
-                            "%s 负重: %d / %d  (%s)",
-                            categoryName(category, living), current, cap, ratio))
+                            "%s 负重: %s / %d  (%s)",
+                            categoryName(category, living), shown, cap, ratio))
                     .withStyle(ChatFormatting.GRAY));
         } catch (final Throwable t) {
             if (LOAD_FAILURE_LOGGED.compareAndSet(false, true)) {
@@ -192,6 +204,26 @@ public class IcyHorseJadePlugin implements IWailaPlugin {
             tooltip.add(Component.literal("负重: 读取失败（详见日志）")
                     .withStyle(ChatFormatting.DARK_GRAY));
         }
+    }
+
+    /**
+     * 当前负重，取自 More Attributes 同步到客户端的 {@code equip_load_current}。
+     *
+     * <p>用 {@code getValue()} 而不是 {@code getBaseValue()}：服务端算惩罚时用的也是它
+     * （玩家那份马车重量挂的是 ADDITION 修饰符），这样显示值与实际生效值完全一致。
+     *
+     * @return 读不到时返回 {@code null}（More Attributes 缺席，或该实体没有这个属性）
+     */
+    private static Integer syncedLoad(LivingEntity living) {
+        final Attribute attribute = MoreAttributesApi.equipLoadCurrent();
+        if (attribute == null) {
+            return null;
+        }
+        final AttributeInstance instance = living.getAttribute(attribute);
+        if (instance == null) {
+            return null;
+        }
+        return (int) Math.round(instance.getValue());
     }
 
     /**
