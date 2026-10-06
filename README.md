@@ -123,6 +123,19 @@ $env:JAVA_HOME = '<JDK 17 路径>'
 python tools\check_mixin_injectors.py
 ```
 
+部署**请用** `tools\deploy.ps1`，不要手动 `Copy-Item`：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\deploy.ps1
+```
+
+它会在**游戏运行时拒绝部署**——在游戏运行中覆盖 mod jar 会让游戏之后加载本模组的类时
+崩溃（`NoClassDefFoundError`，因为 Forge 的包索引在启动时就固定了，而文件已被换掉）。
+脚本还会校验 jar 里的关键条目并逐个打印 SHA1。
+
+> `deploy.ps1` 必须保存为 **UTF-8 with BOM**：Windows PowerShell 5.1 对无 BOM 的
+> UTF-8 文件会按 ANSI 解析，中文乱码、变量被吞，判断随之失效。
+
 ## 授权与致谢
 
 本附属模组以 **MIT** 授权，见 [`LICENSE`](LICENSE)。

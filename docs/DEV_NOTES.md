@@ -1670,6 +1670,67 @@ if (hasCart(player, uuid))  return Outcome.fail("…manage.cart_attached");   //
 （方法签名只出现 Minecraft 类型，调用方先查 `hasTfcAstikorCarts()`，
 模组缺席时类不会被解析）。
 
+### 14.17 一次「进世界崩溃」的真实原因：热替换 jar（不是模组坏了）
+
+**现象**（2026-10-06 19:18:28）：进世界时崩在 `Saving entity NBT`
+
+```
+NoClassDefFoundError: com/tfcicys/horses/taming/TfcEquineTaming
+    at AbstractHorse.handler$…$tfcicys$temperFromFamiliarity
+Caused by: ClassNotFoundException: com.tfcicys.horses.taming.TfcEquineTaming
+```
+
+**而那个类就在 jar 里**（部署的那份 211,152 B、sha1 `a6592e21…`，`taming/` 条目齐全）。
+时间线给出了答案：
+
+| 时刻 | 事件 |
+|---|---|
+| 19:17:37 | 覆盖了 `versions\TFC_Wild_Fire\mods\terras-horsesies-1.0.0.jar` |
+| （此前） | 游戏已经在运行 |
+| 19:18:28 | 崩溃（同一个进程） |
+| 19:18:57 | 用户重启，新会话加载正常，无本模组异常 |
+
+原因：Forge 的 `ModuleClassLoader` 在**启动时**按当时的 jar 建立「包 → 模块」索引；
+文件在脚下被换掉之后，索引与实际内容对不上，加载我们自己类时就报「类找不到」。
+**这与模组是否完好无关，换任何 jar 都一样。**
+
+**机制化的预防**：新增 `tools\deploy.ps1`，部署前检查 `javaw`/`java` 进程，
+发现就拒绝退出（`-Force` 可强行，但不建议），并顺带校验 jar 里的关键条目、打印 SHA1。
+README 的构建一节已改为「部署请用脚本，不要手动 Copy-Item」。
+
+> 脚本本身有个坑要记住：必须保存为 **UTF-8 with BOM**。Windows PowerShell 5.1 对
+> 无 BOM 的 UTF-8 会按 ANSI 解析，中文乱码、变量被吞，`if` 判断随之失效
+> —— 第一次试跑就是这样静默失效的。
+
+### 14.18 依赖升级后的兼容性核对方法（Icy 2.0.6 → 2.1.0）
+
+项目进行到一半时 Icy 升到了 **2.1.0**（我们 `libs/` 里是 2.0.6）。
+注入点按名字硬匹配，改名就会**启动/加载即崩**，所以核对方法必须可靠。
+有效的做法是**用 refmap 里的 SRG 名去核对用户实例里的 jar**：
+
+```
+refmap 条目方向：com/tfcicys/horses/mixin/<我们的类> → {"<开发名>(<开发desc>)": "L<owner>;<srg名>(<srg desc>)"}
+```
+
+- **原版目标**（`AbstractHorse` 等）要用 **`forge-…-srg.jar`** 核对，不能用
+  `…_mapped_official_…jar`：后者里方法名是**映射名**（`hurt`），
+  而生产环境注入的是 SRG 名（`m_6469_`），拿映射 jar 去比会全数误报。
+- **上游模组目标**（Icy/TFC/AstikorCarts）用**用户实例 mods 目录里的那份 jar** 核对，
+  这样核的就是实际运行的东西。
+- `remap = false` 的目标是上游自有方法（`teleport`、`discardOldBody`、`lookup`、
+  `defend`、`onHurt`…），名字必须逐字一致，用 `javap -p` 直接看即可。
+
+**别凭记忆猜 SRG 名**：我曾以为 `Goal.canUse` 是 `m_8047_`，据此判断
+`DefendOwnerGoal` 在 2.1.0 里"丢了三个方法"，实际它是 `m_8036_`，
+三个方法一直都在 —— 差点为不存在的兼容问题改代码。以 refmap 为准。
+
+本次核对结果（Icy 2.1.0 + TFC 3.2.20 + TFCAstikorCarts 1.1.8.3 + astikorcarts 1.1.8）：
+
+- Icy 侧 8 处映射目标 **全部存在**（含新加的 `HorsePlacement.teleport`、
+  `HorseManagement.discardOldBody`，以及 `DefendOwnerGoal` 的 `m_8036_/m_8041_/m_8045_`）；
+- `remap = false` 的 Icy 自有方法 7 处 **全部存在**；
+- 原版侧 7 处 SRG 目标 **全部存在**，含新增的 `AbstractHorse.inventory` → `f_30520_`。
+
 ---
 
 ## 15. TFC 金属马铠的外观
