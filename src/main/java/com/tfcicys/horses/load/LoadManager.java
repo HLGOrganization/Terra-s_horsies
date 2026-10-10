@@ -12,6 +12,7 @@ import com.tfcicys.horses.TFCICYSConfig;
 import com.tfcicys.horses.TfcIcysHorses;
 import com.tfcicys.horses.mixin.AbstractHorseInventoryAccess;
 
+import icy.betterhorses.net.IHorseData;
 import net.dries007.tfc.common.entities.livestock.TFCAnimalProperties;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
@@ -104,15 +105,39 @@ public final class LoadManager {
     // ══════════════════════════════════════════════════════════════
 
     /**
-     * 生物（含马匹）的负重上限，已计入衰老。
+     * 生物（含马匹）的负重上限，已计入衰老与羁绊。
      *
      * <p>衰老取 TFC 的 {@code uses / usesToElderly}（Jade 显示的「衰老值」就是它）。
      * 线性插值到配置的 {@code agedLoadFactor}：衰老 0% 时是原值，
      * 100% 时降到 70%。
+     *
+     * <p>羁绊是第三个系数（{@link #bondLoadFactor}），默认每 1 点 +0.4%、满 100 点 +40%。
+     * 三个系数<b>相乘</b>：一只满羁绊又满衰老的挽马是
+     * {@code 4800 × 0.6 × 1.4}，而不是相加。
      */
     public static int capOf(LivingEntity entity) {
         final int base = HorseCategory.capFor(entity);
-        return Math.max(0, (int) Math.round(base * agingFactor(entity)));
+        return Math.max(0, (int) Math.round(base * agingFactor(entity) * bondLoadFactor(entity)));
+    }
+
+    /**
+     * 羁绊折算出的上限系数：每 1 点羁绊 +0.4 个百分点（可配置），满 100 点 +40%。
+     *
+     * <p>只对马科生效：羁绊是 Icy 加在 {@code AbstractHorse} 上的数据
+     * （Icy 的 {@code AbstractHorseMixin} 在 {@code AbstractHorse} 上 {@code implements IHorseData}），
+     * 玩家和其他生物读不到，一律返回 1.0。羁绊值本身由 Icy 钳在 0~100，
+     * 这里再夹一次是为了手改 NBT 的情况。
+     *
+     * <p>与衰老一样，它只在 {@link #capOf} 里参与计算；真正写进 {@code equip_load_max}
+     * 仍然走 {@code updateAnimal} 里「只在数值变化时才写」的那条路，不会因为羁绊而多发包。
+     */
+    private static double bondLoadFactor(LivingEntity entity) {
+        final double perBond = TFCICYSConfig.bondLoadPercentPerBond();
+        if (perBond <= 0.0D || !(entity instanceof AbstractHorse horse)) {
+            return 1.0D;
+        }
+        final int bond = IHorseData.of(horse).bh_getBond();
+        return 1.0D + Mth.clamp(bond, 0, 100) * perBond / 100.0D;
     }
 
     /** 衰老折算出的上限系数：1.0（年轻）→ agedLoadFactor（满衰老）。 */

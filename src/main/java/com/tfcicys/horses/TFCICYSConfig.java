@@ -6,6 +6,7 @@ import com.tfcicys.horses.load.MoreAttributesApi;
 
 import icy.betterhorses.net.IHorseData;
 import net.dries007.tfc.common.entities.livestock.horse.HorseProperties;
+import net.minecraft.util.Mth;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.animal.horse.AbstractHorse;
 import net.minecraft.world.entity.player.Player;
@@ -42,6 +43,37 @@ public final class TFCICYSConfig {
      * 但读配置项本身会抛 {@code IllegalStateException}，不能让它有机会崩在 tick 里。
      */
     public static final int DEFAULT_CART_REFRESH_TICKS = 5;
+
+    /**
+     * 羁绊给移动速度的加成出厂默认值：<b>每 5 点羁绊 +2 个百分点</b>。
+     *
+     * <p>也就是满羁绊（100）<b>+40%</b>。Icy 原来的硬编码是「每 20 点 +15%、满 75%」，
+     * 由 {@code BhBondAttributesMixin} 整条接管，这里给的是替代公式的参数。
+     */
+    public static final double DEFAULT_BOND_SPEED_PER_FIVE = 2.0D;
+
+    /**
+     * 羁绊给跳跃力的加成出厂默认值：<b>每 5 点羁绊 +1 个百分点</b>。
+     *
+     * <p>也就是满羁绊（100）<b>+20%</b>。
+     */
+    public static final double DEFAULT_BOND_JUMP_PER_FIVE = 1.0D;
+
+    /**
+     * 羁绊给负重上限的加成出厂默认值：<b>每 1 点羁绊 +0.4 个百分点</b>。
+     *
+     * <p>也就是满羁绊（100）<b>+40%</b>。粒度是逐点连续，不是像速度／跳跃那样每 5 点一档。
+     */
+    public static final double DEFAULT_BOND_LOAD_PER_BOND = 0.4D;
+
+    /** 羁绊回血每次恢复的生命值出厂默认值：<b>1.0 = 半颗心</b>。 */
+    public static final double DEFAULT_BOND_REGEN_HEAL = 1.0D;
+
+    /** 羁绊回血间隔的「0 羁绊」锚点（秒）。 */
+    public static final double DEFAULT_BOND_REGEN_SECONDS_AT_ZERO = 15.0D;
+
+    /** 羁绊回血间隔的「满羁绊」锚点（秒）。 */
+    public static final double DEFAULT_BOND_REGEN_SECONDS_AT_FULL = 5.0D;
 
     /**
      * 环境伤害逃跑默认忽略的伤害类型。
@@ -153,6 +185,99 @@ public final class TFCICYSConfig {
         } catch (final IllegalStateException notLoadedYet) {
             return false;
         }
+    }
+
+    // ── 羁绊属性加成 ────────────────────────────────────────────────
+
+    /**
+     * 每 5 点羁绊给移动速度加多少个百分点（默认 2.0 → 满羁绊 +40%）。
+     *
+     * <p>由 {@link com.tfcicys.horses.mixin.BhBondAttributesMixin} 读取；
+     * 那里在运行时被调用，配置早已加载，{@code catch} 只是防御性的。
+     */
+    public static double bondSpeedPerFive() {
+        try {
+            return COMMON.bondSpeedPerFive.get();
+        } catch (final IllegalStateException notLoadedYet) {
+            return DEFAULT_BOND_SPEED_PER_FIVE;
+        }
+    }
+
+    /** 每 5 点羁绊给跳跃力加多少个百分点（默认 1.0 → 满羁绊 +20%）。 */
+    public static double bondJumpPerFive() {
+        try {
+            return COMMON.bondJumpPerFive.get();
+        } catch (final IllegalStateException notLoadedYet) {
+            return DEFAULT_BOND_JUMP_PER_FIVE;
+        }
+    }
+
+    /**
+     * 每 1 点羁绊给负重上限加多少个百分点（默认 0.4 → 满羁绊 +40%）。
+     *
+     * <p>注意粒度与速度／跳跃不同：那两项是<b>每 5 点</b>一档，负重是<b>每 1 点</b>连续变化。
+     */
+    public static double bondLoadPercentPerBond() {
+        try {
+            return COMMON.bondLoadPercentPerBond.get();
+        } catch (final IllegalStateException notLoadedYet) {
+            return DEFAULT_BOND_LOAD_PER_BOND;
+        }
+    }
+
+    /** 羁绊回血是否开启。 */
+    public static boolean bondRegenEnabled() {
+        try {
+            return COMMON.bondRegenEnabled.get();
+        } catch (final IllegalStateException notLoadedYet) {
+            return true;
+        }
+    }
+
+    /**
+     * 是否只让**有主人**的马回血（默认 true）。
+     *
+     * <p>关掉之后，世界上每一匹没被驯服的马（以及 TFC 的家畜马）都会按羁绊 0 的
+     * 15 秒一档慢慢回血 —— 那等于给整个世界的野生动物上了自愈，所以默认收在"有主"。
+     */
+    public static boolean bondRegenOwnedOnly() {
+        try {
+            return COMMON.bondRegenOwnedOnly.get();
+        } catch (final IllegalStateException notLoadedYet) {
+            return true;
+        }
+    }
+
+    /** 每次回血恢复多少点生命值（默认 1.0 = 半颗心）。 */
+    public static double bondRegenHeal() {
+        try {
+            return COMMON.bondRegenHeal.get();
+        } catch (final IllegalStateException notLoadedYet) {
+            return DEFAULT_BOND_REGEN_HEAL;
+        }
+    }
+
+    /**
+     * 羁绊折算出的回血间隔（tick）：在「0 羁绊」与「满羁绊」两个锚点之间按羁绊线性插值。
+     *
+     * <p>出厂值 15 秒 → 5 秒，也就是每 1 点羁绊少 0.1 秒：
+     * 50 羁绊 = 10 秒、80 羁绊 = 7 秒，正好落在需求给的四个锚点上。
+     *
+     * <p>返回至少 1 tick，避免有人把锚点填成 0 造成每 tick 回血。
+     */
+    public static int bondRegenIntervalTicks(final int bond) {
+        final double atZero;
+        final double atFull;
+        try {
+            atZero = COMMON.bondRegenSecondsAtZeroBond.get();
+            atFull = COMMON.bondRegenSecondsAtFullBond.get();
+        } catch (final IllegalStateException notLoadedYet) {
+            return secondsToTicks(DEFAULT_BOND_REGEN_SECONDS_AT_ZERO);
+        }
+
+        // 羁绊本身被 Icy 钳在 0~100，这里再夹一次是为了对得住「超过 100 也不更快」。
+        final double t = Mth.clamp(bond / 100.0D, 0.0D, 1.0D);
+        return Math.max(1, secondsToTicks(atZero + (atFull - atZero) * t));
     }
 
     /** 被自己的马主攻击时是否完全不反击。 */
@@ -712,6 +837,16 @@ public final class TFCICYSConfig {
         public final ForgeConfigSpec.DoubleValue maLevelBonusPerLevel;
         public final ForgeConfigSpec.DoubleValue maLevelBonusMax;
 
+        // ── 羁绊加成 ────────────────────────────────────────────────
+        public final ForgeConfigSpec.DoubleValue bondSpeedPerFive;
+        public final ForgeConfigSpec.DoubleValue bondJumpPerFive;
+        public final ForgeConfigSpec.DoubleValue bondLoadPercentPerBond;
+        public final ForgeConfigSpec.BooleanValue bondRegenEnabled;
+        public final ForgeConfigSpec.BooleanValue bondRegenOwnedOnly;
+        public final ForgeConfigSpec.DoubleValue bondRegenHeal;
+        public final ForgeConfigSpec.DoubleValue bondRegenSecondsAtZeroBond;
+        public final ForgeConfigSpec.DoubleValue bondRegenSecondsAtFullBond;
+
         // ── 马铠 ────────────────────────────────────────────────────
         public final ForgeConfigSpec.BooleanValue cactusProofArmor;
 
@@ -1016,6 +1151,70 @@ public final class TFCICYSConfig {
             maLevelBonusMax = b
                     .comment("Cap for that bonus, in percentage points. Default 50.")
                     .defineInRange("bonusMax", 50.0D, 0.0D, 100.0D);
+
+            b.pop();
+
+            b.pop();
+
+            b.comment("Bond bonus to the mount's own attributes").push("bond");
+
+            b.comment("Icy hard-codes its own curve here: +15% movement speed and +15% jump strength per 20",
+                      "bond points, capped at +75% at bond 100. This mod REPLACES that formula with the",
+                      "values below. Both are applied as MULTIPLY_BASE modifiers, per 5 bond points, in",
+                      "percent, and are swapped in place (never stacked) when the bond changes.",
+                      "Defaults: 2.0 -> +40% speed at bond 100, 1.0 -> +20% jump at bond 100.")
+                    .push("per_five");
+
+            bondSpeedPerFive = b
+                    .comment("Movement speed per 5 bond points, in percent. Default 2.0 (100 bond = +40%).")
+                    .defineInRange("speed", DEFAULT_BOND_SPEED_PER_FIVE, 0.0D, 100.0D);
+
+            bondJumpPerFive = b
+                    .comment("Jump strength per 5 bond points, in percent. Default 1.0 (100 bond = +20%).")
+                    .defineInRange("jump", DEFAULT_BOND_JUMP_PER_FIVE, 0.0D, 100.0D);
+
+            b.pop();
+
+            b.comment("-- Carry capacity --").push("load");
+
+            bondLoadPercentPerBond = b
+                    .comment("Carry capacity gained per 1 bond point, in percent. Default 0.4 (= +40% at bond 100).",
+                             "Unlike speed and jump this is continuous per point, not per 5 points.",
+                             "It multiplies on top of everything else:",
+                             "cap = archetype cap x aging factor x (1 + bond x this / 100).")
+                    .defineInRange("percentPerBond", DEFAULT_BOND_LOAD_PER_BOND, 0.0D, 100.0D);
+
+            b.pop();
+
+            b.comment("-- Slow self-healing --").push("regen");
+
+            bondRegenEnabled = b
+                    .comment("Horses mend themselves over time while damaged. Default true.")
+                    .define("enabled", true);
+
+            bondRegenOwnedOnly = b
+                    .comment("Only horses that have an owner heal. Default true.",
+                             "false = every horse in the world, wild ones included, heals at the bond-0 rate.")
+                    .define("ownedOnly", true);
+
+            bondRegenHeal = b
+                    .comment("Health restored per pulse, in hit points. Default 1.0 (half a heart).")
+                    .defineInRange("healPerPulse", DEFAULT_BOND_REGEN_HEAL, 0.0D, 100.0D);
+
+            b.comment("Seconds between pulses, linearly interpolated by bond.",
+                      "Defaults 15 s at bond 0 -> 5 s at bond 100, i.e. 0.1 s faster per bond point,",
+                      "which puts bond 50 at 10 s and bond 80 at 7 s.")
+                    .push("interval_seconds");
+
+            bondRegenSecondsAtZeroBond = b
+                    .comment("Seconds between pulses at bond 0. Default 15.")
+                    .defineInRange("atZeroBond", DEFAULT_BOND_REGEN_SECONDS_AT_ZERO, 0.05D, 3600.0D);
+
+            bondRegenSecondsAtFullBond = b
+                    .comment("Seconds between pulses at bond 100. Default 5.")
+                    .defineInRange("atFullBond", DEFAULT_BOND_REGEN_SECONDS_AT_FULL, 0.05D, 3600.0D);
+
+            b.pop();
 
             b.pop();
 

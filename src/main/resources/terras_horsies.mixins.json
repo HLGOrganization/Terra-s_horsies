@@ -10,6 +10,7 @@
     "AbstractHorseThreatMixin",
     "AbstractHorseTamingMixin",
     "BhBreedHorseFamiliarityMixin",
+    "BhBondAttributesMixin",
     "BhHorseCombatAlertDefendMixin",
     "HorseCombatRetaliateMixin",
     "DefendOwnerGoalAggroMixin",

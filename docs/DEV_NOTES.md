@@ -70,6 +70,9 @@
 | 23 | **年龄统一由 TFC 的生日决定**；野外生成补生日戳（避免刷出来的马全是幼年）；马匹面板的预览实体不再一律显示为幼驹 | `mixin/BhBreedHorseFamiliarityMixin.java`（见第 20 节） |
 | 24 | **TFC 自己的马、驴、骡也能按亲密度概率驯服**。原版只有 Icy 生效：TFC 的 temper 恒为 0（成功率 0%），而且就算掷骰成功，它只设原版 tame 标记 —— TFC 的 `isTamed()` 只看亲密度，于是马永远"未驯服"、玩家被无限甩下来 | `mixin/AbstractHorseTamingMixin.java`、`taming/TfcEquineTaming.java`（见第 19 节） |
 | 25 | **被非生物来源伤害时主动逃离**：岩浆、岩浆块、火焰、甜浆果丛、掉落的铁砧／TNT……每次挨伤都续一次时限，一直逃到**不再受伤**为止（= 已离开伤害区域）。家养马同样生效，被骑着时让位给玩家 | `mixin/AbstractHorseThreatMixin.java`、`util/EnvironmentalDamage.java`、`ai/FleeFromThreatGoal.java`（见第 21 节） |
+| 26 | **与 Icy 指令轮盘共存**：修复「停留／游荡／跟随／回厩彻底失效」——本模组曾按优先级整批删掉 Icy 装在同一优先级上的四个指令目标；现在诱惑目标改到空槽 5，不再碰优先级 3 | `mixin/BhBreedHorseFamiliarityMixin.java`（见第 23 节） |
+| 27 | **羁绊属性加成改为可配置**：Icy 原本满羁绊给 +75% 速度与 +75% 跳跃，本模组接管该公式，改为 **+40% 速度 / +20% 跳跃**（每 5 点 +2% / +1%，可在配置里调） | `mixin/BhBondAttributesMixin.java`（见第 24 节） |
+| 28 | **羁绊再加两项**：满羁绊 **负重上限 +40%**（每 1 点 +0.4%，与衰老相乘）与**被动自愈**（0/50/80/100 羁绊 = 15/10/7/5 秒一次、每次半颗心，默认只对有主人的马生效） | `load/LoadManager.java`、`BondRegeneration.java`（见第 25 节） |
 
 ---
 
@@ -990,6 +993,10 @@ new TemptGoal(this, 1.25f, Ingredient.of(getFoodTag()), false)
 速度系数 `1.25` 与 `canScare = false` 沿用 TFC。判据是 `getFoodTag()`，
 也就是 `isFood` 接受的那个 `tfc:horse_food` 标签——
 **能被喂的东西，就是马会主动走向的东西**。
+
+> ⚠️ **优先级是 5，不是 3。** Icy 把四个指令轮盘目标全装在优先级 3，
+> 而这段覆写曾经照抄 TFC 的 `removeGoalOfPriority(goalSelector, 3)`，
+> 于是在构造期把它们一次删光、轮盘彻底失效。原因、证据与代价见 **第 23 节**。
 
 ---
 
@@ -3135,6 +3142,289 @@ Patchouli + GeckoLib）时，Mixin 那一层能读到 `terras_horsies.mixins.jso
 `Preparing terras_horsies.mixins.json (15)`）；只留本模组一个 jar 时读不到，
 报的就是上面那条"invalid or could not be read"。原因尚未完全确认，
 但**交付的 jar 不受影响**，所以不再深挖。
+
+---
+
+## 23. 与 Icy 的指令轮盘共存（修复：不再误删优先级 3）
+
+**症状**：游戏内用 Icy 的「马匹指令轮盘」（`key.icys-better-horses.radial`）选
+**停留 / 游荡 / 跟随 / 回厩**，马毫无反应 —— 表现为"轮盘完全失效"。
+
+**根因**：第 13 节那段 `registerGoals` 覆写照抄了 TFC 的一行
+`EntityHelpers.removeGoalOfPriority(this.goalSelector, 3)`，
+而 Icy 恰好把**它全部四个指令目标**都装在优先级 3 上。
+
+### 23.1 证据链（三条，全部反汇编确认）
+
+| # | 事实 | 证据 |
+|---|------|------|
+| 1 | Icy 的 `bh_onRegisterGoals` 是 `AbstractHorse.registerGoals` 的 TAIL 注入 | `AbstractHorseMixin` 的常量池里是 `@Mixin` → `AbstractHorse`，且同时含 `registerGoals` 与 `TAIL` |
+| 2 | 四个指令目标全部装在优先级 3 | `bh_onRegisterGoals` 里四个 `iconst_3` + `GoalSelector.addGoal`：`HorseStayGoal` / `HorseFollowOwnerGoal` / `HorseReturnHomeGoal` / `HorseWanderBoundsGoal` |
+| 3 | `removeGoalOfPriority` 是按优先级**整批**删 | TFC `EntityHelpers`：`goalSelector.getAvailableGoals().removeIf(w -> w.getPriority() == p)` |
+
+关键在于三者的先后是**确定的**，不依赖任何 mixin 应用顺序：
+本项目的覆写先跑 `super.registerGoals()`（Icy 的 TAIL 注入就在这条 super 链上，
+四个目标此时已进选择器），**紧接着下一行**才执行删除。
+
+### 23.2 为什么原版没事、Icy 有事
+
+TFC 把 `TemptGoal` 放在优先级 3，前提是"**原版把 3 空着**"。逐个读
+`AbstractHorse.registerGoals` 里 `addGoal` 前的常量，可以确认原版占用
+1/2/4/6/7/8/9，0 是 `FloatGoal`：
+
+| 优先级 | 原版 | Icy | 本项目（改后） |
+|---|---|---|---|
+| 0 | `FloatGoal` | | `FleeFromThreatGoal` |
+| 1 | `PanicGoal`、`RunAroundLikeCrazyGoal` | `SpookGoal` | |
+| 2 | `BreedGoal` | `DefendOwnerGoal` | `BreedGoal`（按类重建，扩大配对范围） |
+| 3 | *空* | **四个指令目标** | *不再占用* |
+| 4 | `FollowParentGoal` | | |
+| **5** | *空* | | **`TemptGoal`（改后）** |
+| 6 | `WaterAvoidingRandomStrollGoal` | | |
+| 7 | `LookAtPlayerGoal` | | |
+| 8 | `RandomLookAroundGoal` | | |
+| 9 | `RandomStandGoal` | | |
+
+**5 是唯一还空着、且比 6 靠前的槽位** —— 与 TFC 当年选 3 的理由完全同构。
+指令在 3、诱惑在 5，于是"有指令时听指令、没指令时才被食物引走"。
+
+### 23.3 改法与代价
+
+```java
+super.registerGoals();
+EntityHelpers.removeGoalOfClass(this.goalSelector, TemptGoal.class);   // 按类清，不再按优先级
+this.goalSelector.addGoal(5, new TemptGoal(this, 1.25F, Ingredient.of(getFoodTag()), false));
+```
+
+- 按**类**清 `TemptGoal` 保留了原意（我们的诱惑目标不会被另一个诱惑目标顶掉），
+  同时不会误伤任何其他优先级。
+- 代价：马**已经收到指令**（停留／跟随／游荡）时，诱惑目标（5）要让位给指令目标（3），
+  举食物不再把它叫过来。这是刻意的 —— 听指令优先于被食物引走，
+  要叫回马本来就有哨子和轮盘。
+
+### 23.4 验证方式
+
+**已在游戏内确认（2026-10-11）：轮盘的「跟随 / 停留 / 游荡」三项全部恢复正常**，
+修复前三项完全无反应。
+
+还剩一项建议顺手确认（23.3 那笔代价是否可接受，属体验取舍、不影响正确性）：
+
+1. 选**停留**时举食物：马**不应**被引走 —— 指令目标在优先级 3、诱惑目标在 5，
+   这是刻意的优先级安排。
+2. 不设指令（或清掉指令）后举食物：马应走过来 —— 第 13 节的功能仍然有效。
+
+---
+
+## 24. 羁绊属性加成：接管 Icy 的公式
+
+**背景**：Icy 的「羁绊（Bond）」满 100 点时给 **+75% 移动速度**和 **+75% 跳跃力**，
+整合包认为太陡。目标改为 **速度 +40%、跳跃 +20%**，
+也就是**每 5 点羁绊 +2% 速度、+1% 跳跃**。
+
+### 24.1 Icy 原来是什么
+
+`BhHorseTraits.applyBondAttributes(AbstractHorse, int)` 全文只有三行（逐字节确认）：
+
+| 偏移 | 内容 |
+|---|---|
+| 0-13 | `Math.min(bond / 20, 5) * 0.15` —— 每 20 点 +15%，满 100 点 +75% |
+| 14-29 | `BhHorseAttributes.apply(horse, MOVEMENT_SPEED, Source.BOND, "growth", growth, MULTIPLY_BASE)` |
+| 30-45 | 同上，属性换成 `JUMP_STRENGTH` —— **与速度共用同一个系数** |
+
+关键点：Icy 的设计里速度与跳跃**必须同涨幅**。要拆成 +40% / +20%，
+就不能只改参数，只能接管整个方法。
+
+### 24.2 为什么接管是安全的（不会叠成双倍）
+
+`BhHorseAttributes.apply` 的语义是「按 `(Source, name)` 派生的固定 UUID **先删后加**」：
+
+| 偏移 | 指令 |
+|---|---|
+| 20-27 | `AttributeInstance.removeModifier(uuidFor(source + name))`（`m_22120_`） |
+| 30-57 | 数值非 0 时 `addTransientModifier(new AttributeModifier(同一个 UUID, ...))`（`m_22118_`） |
+
+所以同一身份是**替换**、不是叠加。本 mixin 沿用 Icy 自己的
+`Source.BOND` + `"growth"`，因此反复触发（每次 `bh_setBond`／读档）都只是把同一个
+UUID 的修饰符换掉。另外它是 `addTransientModifier`：不进存档，读档后由
+`bh_applyBondAttributes()` 重算 —— 而那条路径同样经过本 mixin。
+
+### 24.3 速度与跳跃各是哪个属性（装反会把 40/20 对调）
+
+两个 SRG 字段的身份是从 Icy 自己的用法反推的，不是猜的：
+
+| 证据（`HorseInfoScreen`） | 结论 |
+|---|---|
+| `f_22279_` × 43.2 → 配文案 `screen.icys-better-horses.info.speed` | `f_22279_` = `MOVEMENT_SPEED` |
+| `f_22288_` → `max(v × 6 − 1, 0)` → 配文案 `...info.jump` | `f_22288_` = `JUMP_STRENGTH` |
+| 只引用 `f_22279_` 的四个类全是速度语义：`ArchetypePerks`（Western 道路加速）、`Endurance`／`StandstillBurst`／`TopEnd`（三种冲刺） | 交叉印证 |
+
+### 24.4 改法
+
+`mixin/BhBondAttributesMixin.java`：
+
+```java
+@Inject(
+        method = "applyBondAttributes(Lnet/minecraft/world/entity/animal/horse/AbstractHorse;I)V",
+        at = @At("HEAD"), cancellable = true, remap = false)
+private static void tfcicys$bondBonus(AbstractHorse horse, int bond, CallbackInfo ci) {
+    final int steps = Math.min(Math.max(bond, 0), 100) / 5;
+    BhHorseAttributes.apply(horse, MOVEMENT_SPEED, Source.BOND, "growth",
+            steps * TFCICYSConfig.bondSpeedPerFive() / 100.0D, MULTIPLY_BASE);
+    BhHorseAttributes.apply(horse, JUMP_STRENGTH, Source.BOND, "growth",
+            steps * TFCICYSConfig.bondJumpPerFive() / 100.0D, MULTIPLY_BASE);
+    ci.cancel();
+}
+```
+
+配置（`config/terras_horsies-common.toml`）：
+
+```toml
+[bond.per_five]
+	# 每 5 点羁绊给移动速度多少个百分点，默认 2.0（满羁绊 +40%）
+	speed = 2.0
+	# 每 5 点羁绊给跳跃力多少个百分点，默认 1.0（满羁绊 +20%）
+	jump = 1.0
+```
+
+对照表：
+
+| 羁绊 | 0 | 20 | 40 | 60 | 80 | 100 |
+|---|---|---|---|---|---|---|
+| 速度（改后） | 0 | +8% | +16% | +24% | +32% | **+40%** |
+| 跳跃（改后） | 0 | +4% | +8% | +12% | +16% | **+20%** |
+| 速度与跳跃（Icy 原版） | 0 | +15% | +30% | +45% | +60% | +75% |
+
+### 24.5 代价与升级核对
+
+- **接管意味着 Icy 以后若在这个方法里再加第三条属性，本 mixin 不会跟着加。**
+  升级 Icy 时按 14.18 节的办法重新看一眼 `applyBondAttributes` 的方法体即可
+  （它很短，三行）。
+- 加成的粒度是**每 5 点一档**（与 Icy 原版的每 20 点一档同风格）。
+  想要逐点平滑：把 `TFCICYS_BOND_PER_STEP` 改成 1，同时把配置值改成
+  `speed = 0.4`、`jump = 0.2`（每 1 点 +0.4% / +0.2% 等价于现在的曲线）。
+- 羁绊的**其它作用不受影响**（能力档位 0/40/100、受惊率、替主人报仇门槛、
+  哨子召回门槛等，以 Icy 自身的手册为准）。
+
+---
+
+## 25. 羁绊的另外两项：负重上限与自愈
+
+第 24 节改的是羁绊对**马自身属性**的加成。这一节再加两项，都是整合包自己的设定，
+不需要接管 Icy 的任何方法。
+
+### 25.1 负重上限：每 1 点羁绊 +0.4%，满 100 点 +40%
+
+注入点是本模组自己的上限公式（`load/LoadManager.capOf`），**三个系数相乘**：
+
+```java
+cap = HorseCategory.capFor(entity)          // 品种/类别基础上限
+    × agingFactor(entity)                   // 衰老：1.0 → agedLoadFactor（默认 0.6）
+    × bondLoadFactor(entity)                // 羁绊：1.0 → 1.4（本项新增）
+```
+
+`bondLoadFactor` = `1 + clamp(bond, 0, 100) × percentPerBond / 100`，默认 `percentPerBond = 0.4`。
+
+两个容易记错的点：
+
+- **粒度与速度／跳跃不同**：那两项是「每 5 点一档」，负重是**逐点连续**（需求原话
+  「每 1 羁绊 +0.4%」）。所以它不会横跳，每涨 1 点羁绊就多一点点。
+- **只对马科生效**：羁绊是 Icy 加在 `AbstractHorse` 上的数据
+  （Icy 的 `AbstractHorseMixin` 在 `AbstractHorse` 上 `implements IHorseData`），
+  玩家与其它生物一律返回 1.0。判定用 `instanceof AbstractHorse`，失败的代价只是少个加成，
+  不会抛异常。
+
+相乘而不是相加的效果（以挽马 4800 为例）：
+
+| 羁绊 \ 衰老 | 0% | 100%（×0.6） |
+|---|---|---|
+| 0 | 4800 | 2880 |
+| 50（+20%） | 5760 | 3456 |
+| 100（+40%） | **6720** | **4032** |
+
+写入仍然走 `updateAnimal` 里「只在数值变化时才写 `equip_load_max`」那条路，
+所以羁绊变化只会在下一次窗口（≤20 tick，拉车时 ≤5 tick）产生**一次**同步，
+不会因为每 tick 重算而多发包。
+
+### 25.2 自愈：羁绊越高回得越快
+
+需求给的四个锚点是 **0 羁绊 15 秒 / 50 羁绊 10 秒 / 80 羁绊 7 秒 / 100 羁绊 5 秒**
+—— 这四个点正好落在同一条直线上：**每 1 点羁绊快 0.1 秒**（`15 − 0.1 × bond`）。
+所以实现成两锚点线性插值，而不是写四段分段函数；改配置里的两个锚点就能整体平移／改斜率。
+
+每次脉冲回 `healPerPulse` 点生命，默认 **1.0 点 = 半颗心**。
+
+实现在 `BondRegeneration`，是**事件**而不是 mixin：
+
+| 决策 | 理由 |
+|---|---|
+| 挂在 `LivingEvent.LivingTickEvent` | 本模组已经订阅它（`load/LoadEvents`），加一个订阅者即可，Icy 完全不用碰 |
+| `instanceof AbstractHorse` 过滤 | 只有马有羁绊；非马只花一次类型判断 |
+| 无状态相位 `(gameTime + entityId) % interval` | 不往马存档里塞自定义键；**读档／重启后不会因为"存的时刻早已过去"而补出一串心跳**（累加式计时器必须额外防这个坑）；实体 id 天然把同刻脉冲错开 |
+| 只在服务端 | 生命值是服务端权威的 |
+| 满血直接返回 | `heal()` 会把当前生命值 `set` 回原值，白标一次脏数据 |
+
+**作用范围默认收在「有主人」**（`ownedOnly = true`）：羁绊本身就是与主人的关系，
+而且关掉它等于让世界上每一匹野马、以及 TFC 的家畜马都按 15 秒一档自愈 ——
+那是另一个量级的平衡改动。
+
+**会与 Icy 自己的同类能力叠加**：Mustang 的 `mustang_self_heal`、Pony 类别的
+`pony_heal` 也各自在回血，本功能不去关它们。不想叠加就在
+`config/icys-better-horses.json` 里关掉对应能力。
+
+### 25.3 配置
+
+```toml
+[bond.load]
+	percentPerBond = 0.4          # 每 1 点羁绊 +0.4% 上限
+
+[bond.regen]
+	enabled = true                # 总开关
+	ownedOnly = true              # 只对有主人的马生效
+	healPerPulse = 1.0            # 每次回 1 点生命 = 半颗心
+	[bond.regen.interval_seconds]
+		atZeroBond = 15.0         # 0 羁绊的回血间隔（秒）
+		atFullBond = 5.0          # 100 羁绊的回血间隔（秒）
+```
+
+四条锚点（0/50/80/100 → 15/10/7/5 秒）与 +40% 上限都是照需求核对过的，
+并且**直接读服务端 config 复算**验证过（见本节末的验证说明）。
+
+### 25.4 一个真实的坑：给配置加子节必须数 `push`/`pop`
+
+加 `[bond.load]` / `[bond.regen]` 时**少写了一个 `b.pop()`**。后果不是编译错误，
+而是 `[armor]` 与 `[debug]` 被嵌成 **`[bond.armor]` / `[bond.debug]`** ——
+`cactusProofArmor`、`debugLoad` 这两个键的路径变了，玩家已经调好的值在换 jar 后
+会变成孤儿键（静默丢失），而且到游戏里才会发现。
+
+抓它的办法是把 `Common` 构造函数按 `push`/`pop` 做一次**静态展开**，直接打印
+配置树，比跑起来看 TOML 快得多：
+
+```python
+import re, io
+src = io.open("src/main/java/com/tfcicys/horses/TFCICYSConfig.java", encoding="utf-8").read()
+body = src[src.index("Common(ForgeConfigSpec.Builder b) {"):]
+body = body[:body.index("/** 把 double 系数安全地转成 int")]
+stack = []
+for m in re.finditer(r'\.push\(\s*"([^"]+)"\s*\)|\bb\.pop\(\);|\.define(?:InRange|ListAllowEmpty)?\(\s*"([^"]+)"', body):
+    if m.group(1):
+        stack.append(m.group(1)); print("  " * len(stack) + "[" + ".".join(stack) + "]")
+    elif m.group(0).startswith("b.pop"):
+        stack.pop()
+    elif m.group(2):
+        print("  " * (len(stack) + 1) + m.group(2))
+print("LEFTOVER:", stack or "none")   # 非空 = 有子节没收口
+```
+
+正确时顶层节应恰好是
+`load / cart / rider / neutral_combat / feeding / taming / bond / armor / debug` 九个，
+且 `LEFTOVER: none`。**以后动这个构造函数都建议先跑一遍。**
+
+### 25.5 验证方式
+
+1. **负重**：给马 `/horse set bond 100`，看 Jade/负重界面里的上限是否比 bond 0 时高 **40%**
+   （同一条马、同一衰老值下比较）；把 `percentPerBond` 改成 0 应立即回到原值。
+2. **自愈**：把马打到半血、`/horse set bond 100`，应当约每 5 秒回半颗心；
+   改成 bond 0 则为每 15 秒。**野马不应回血**（`ownedOnly = true`）。
 
 ---
 
