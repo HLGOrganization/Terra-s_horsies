@@ -860,18 +860,37 @@ public abstract class BhBreedHorseFamiliarityMixin extends Horse implements Hors
      * target class actually declares. Overriding works because {@code Mob}'s constructor calls
      * {@code registerGoals()} virtually, so this body runs during construction just as TFC's does.
      * <p>
-     * {@code removeGoalOfPriority(goalSelector, 3)} is kept from TFC: vanilla leaves priority 3 free,
-     * but clearing it first guarantees the TemptGoal is not silently shadowed if Icy ever adds one
-     * there. The 1.25 speed modifier and {@code canScare = false} are TFC's values.
+     * <b>优先级只能取 5，绝不能照抄 TFC 的「清掉优先级 3」。</b>TFC 当年写
+     * {@code removeGoalOfPriority(goalSelector, 3)} 的前提是原版把 3 空着；而 Icy 把
+     * <b>四个指令轮盘目标全部装在优先级 3</b>：{@code AbstractHorseMixin.bh_onRegisterGoals}
+     * 是 {@code AbstractHorse.registerGoals} 的 {@code @At("TAIL")} 注入（该 mixin 的常量池里
+     * 同时有 {@code registerGoals} 与 {@code TAIL}），四个 {@code iconst_3} 依次装上
+     * {@code HorseStayGoal} / {@code HorseFollowOwnerGoal} / {@code HorseReturnHomeGoal} /
+     * {@code HorseWanderBoundsGoal}。而 TFC 的 {@code EntityHelpers.removeGoalOfPriority} 是
+     * {@code getAvailableGoals().removeIf(w -> w.getPriority() == p)} —— <b>按优先级整批删</b>。
+     * 于是 {@code super.registerGoals()} 刚把它们装好、下一行就被一次删光：玩家在轮盘上选
+     * 停留／游荡／跟随／回厩时 {@code bh_command} 确实变了，但对应目标已经不在选择器里，
+     * 表现就是「指令轮盘完全失效」。2026-10-11 查实的真实缺陷，证据与反汇编记在
+     * docs/DEV_NOTES.md 第 23 节。
      * <p>
-     * Uses {@code getFoodTag()}, i.e. the same {@code tfc:horse_food} tag that {@code isFood} accepts,
-     * so anything a player can hand-feed is also something the horse will walk toward.
+     * 空槽是算出来的，不是猜的：原版 {@code AbstractHorse.registerGoals} 逐个 {@code addGoal}
+     * 用的是 1/2/4/6/7/8/9，Icy 用 1/2/3，0 是 {@code FloatGoal} —— 只有 5 还空着，而且比 6 的
+     * {@code WaterAvoidingRandomStrollGoal} 靠前。这与 TFC 当年选 3 的理由完全同构：占最靠前的
+     * 空槽，让"被食物吸引"压过闲逛。指令目标在 3、本目标在 5，于是"有指令时听指令、
+     * 没指令时才被食物引走"—— 这是刻意的优先级安排，不是将就。
+     * <p>
+     * 1.25 的速度系数与 {@code canScare = false} 都是 TFC 的值。按<b>类</b>清一遍既有
+     * {@code TemptGoal}，只为保留"我们的目标不会被另一个诱惑目标顶掉"这层原意，
+     * 不碰任何其他优先级。{@code getFoodTag()} 与 {@code isFood} 用的是同一个
+     * {@code tfc:horse_food} 标签，所以能喂的东西也是马会走过来的东西。
      */
     @Override
     protected void registerGoals() {
         super.registerGoals();
-        EntityHelpers.removeGoalOfPriority(this.goalSelector, 3);
-        this.goalSelector.addGoal(3, new TemptGoal(this, 1.25F, Ingredient.of(getFoodTag()), false));
+        // 绝不能动优先级 3：Icy 的四个指令轮盘目标（Stay / Follow / ReturnHome / Wander）都在那里。
+        // 曾经照抄 TFC 的 removeGoalOfPriority(goalSelector, 3)，把轮盘整条删没了 —— 见上。
+        EntityHelpers.removeGoalOfClass(this.goalSelector, TemptGoal.class);
+        this.goalSelector.addGoal(5, new TemptGoal(this, 1.25F, Ingredient.of(getFoodTag()), false));
 
         // Vanilla builds BreedGoal with the two-argument constructor, which captures
         // partnerClass = animal.getClass() -- i.e. it only ever looks for its own exact class and would
